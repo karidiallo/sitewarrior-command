@@ -1,7 +1,7 @@
 /* SiteWarrior cloud persistence v6 — per-record CAS, recoverable conflicts and explicit write acknowledgements. */
 (function () {
 'use strict';
-const collections=['leads','leadActivities','tasks','projects','marketing','payments','expenses','subscriptions','events','journal','decisions','quotes','offers','activity','deleted'];
+const collections=['leads','leadActivities','tasks','projects','marketing','payments','expenses','subscriptions','events','journal','decisions','quotes','offers','activity','deleted','weeklyReviews'];
 const meta=['xp','marketNotes','prices','goals','settings'];
 const sep='\u001f';
 let baseline=new Map(), versions=new Map(), changed=false, saving=false, blocked=false, refreshTimer=null;
@@ -13,7 +13,7 @@ const identity=(x,i)=>String(x.id||('legacy-'+i+'-'+String(x.at||x.date||x.name|
 const localKey=()=>`sitewarrior_recovery_v6_${accountId||'unverified'}`;
 function indexState(data){let out=new Map();for(const col of collections){(Array.isArray(data[col])?data[col]:[]).forEach((v,i)=>{if(!v||typeof v!=='object')return;let id=identity(v,i);out.set(key(col,id),{collection:col,id,payload:copy({...v,id})})})}for(const id of meta)out.set(key('__meta',id),{collection:'__meta',id,payload:{value:copy(data[id]??{})}});return out}
 function stateFromRows(rows){let state={};for(const col of collections)state[col]=[];for(const row of rows){let k=key(row.collection,row.record_id);versions.set(k,row.revision);if(row.deleted)continue;baseline.set(k,JSON.stringify(row.payload));if(row.collection==='__meta')state[row.record_id]=row.payload.value;else if(Array.isArray(state[row.collection]))state[row.collection].push(row.payload)}return state}
-function defaults(){return {tasks:[],leads:[],projects:[],marketing:[],payments:[],expenses:[],subscriptions:[],journal:[],events:[],decisions:[],quotes:[],leadActivities:[],activity:[],deleted:[],xp:{Kari:0,Adi:0},marketNotes:{},prices:{},goals:{},settings:{},offers:OFFER_DEFAULTS.map(x=>({...x}))}}
+function defaults(){return {tasks:[],leads:[],projects:[],marketing:[],payments:[],expenses:[],subscriptions:[],journal:[],events:[],decisions:[],quotes:[],leadActivities:[],activity:[],deleted:[],weeklyReviews:[],xp:{Kari:0,Adi:0},marketNotes:{},prices:{},goals:{},settings:{},offers:OFFER_DEFAULTS.map(x=>({...x}))}}
 function status(message,type='pending'){let el=document.getElementById('cloudStatus');if(!el){el=document.createElement('button');el.id='cloudStatus';el.type='button';el.className='cloud-status';el.style.zIndex='98';el.setAttribute('aria-live','polite');el.addEventListener('click',()=>{if(blocked)showConflict();else if(changed)void flush()});document.body.append(el)}el.dataset.status=type;el.textContent=message;el.title=type==='error'?'Kliknij, by zobaczyć opcje odzyskania':'Status synchronizacji z Supabase'}
 function recovery(){if(!cloudActive||!accountId)return;try{localStorage.setItem(localKey(),JSON.stringify({at:new Date().toISOString(),user:accountId,db:copy(db)}))}catch(e){status('BŁĄD KOPII LOKALNEJ','error')}}
 function clearRecovery(){if(accountId)try{localStorage.removeItem(localKey())}catch{}}
