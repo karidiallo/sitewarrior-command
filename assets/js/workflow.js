@@ -27,7 +27,17 @@ function commitTask(t,to,comment=''){
  activity('workflow',`${user}: ${t.name} · ${from} → ${to}${comment?' · '+comment:''}`);
  // Save exactly this record change through the existing per-record cloud pipeline.
  // Never report a server confirmation before the cloud status actually says SAVED.
- save();render();flash(`Przeniesiono: ${from} → ${to}`,'tasks',t.id);
+ const saved=save();
+ render();
+ flash(`Przeniesiono lokalnie: ${from} → ${to}`,'tasks',t.id);
+ Promise.resolve(saved).then(()=>{
+  const el=document.getElementById('swResultToast');
+  if(el)el.querySelector('small').textContent=cloudActive?'POTWIERDZONE W SUPABASE · '+to:'ZAPISANO LOKALNIE · '+to;
+ }).catch(e=>{
+  const el=document.getElementById('swResultToast');
+  if(el){el.querySelector('strong').textContent='BŁĄD ZAPISU · '+to;el.querySelector('small').textContent=e.message+' — zmiany zachowane lokalnie. Kliknij CLOUD / ERROR.'}
+  console.error('SiteWarrior task status was NOT saved:',e);
+ });
  return true;
 }
 window.swWorkflowStatus=(id,to)=>{
