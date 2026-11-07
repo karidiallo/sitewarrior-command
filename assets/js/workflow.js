@@ -30,10 +30,10 @@ window.swWorkflowStatus=(id,to)=>{
 const t=tasks().find(x=>String(x.id)===String(id));if(!t||!taskStages.includes(to))return;
 if(to==='Do sprawdzenia'){
 const reviewer=prompt('Kto ma zatwierdzić zadanie? Kari lub Adi',t.reviewer||(t.owner==='Kari'?'Adi':'Kari'));
-if(reviewer===null)return;if(!['Kari','Adi'].includes(reviewer)){notify('Wybierz Kari lub Adi');return}t.reviewer=reviewer;
+if(reviewer===null){render();return}if(!['Kari','Adi'].includes(reviewer)){notify('Wybierz Kari lub Adi');render();return}t.reviewer=reviewer;
 }
 if(to==='W trakcie'&&taskStatus(t)==='Do sprawdzenia'){
-const reason=prompt('Co wymaga poprawy? Podaj konkretny komentarz.');if(reason===null)return;if(!reason.trim()){notify('Wpisz komentarz do poprawek');return}commitTask(t,to,reason.trim());return;
+const reason=prompt('Co wymaga poprawy? Podaj konkretny komentarz.');if(reason===null){render();return}if(!reason.trim()){notify('Wpisz komentarz do poprawek');render();return}commitTask(t,to,reason.trim());return;
 }
 commitTask(t,to);
 };
@@ -51,8 +51,37 @@ function openTask(id){let t=tasks().find(t=>String(t.id)===String(id));if(!t)ret
 function openProject(id){let p=projects().find(x=>String(x.id)===String(id));if(!p)return;const prog=projectProgress(id),related=tasks().filter(t=>String(t.projectId)===String(id));openPanel('PROJECT INTELLIGENCE',`<h2>${enc(p.name)}</h2><div class="sw-facts"><span>${enc(p.status||'Brief')}</span><span>${enc(p.owner||'—')}</span><span>Deadline: ${dateLabel(p.due)}</span><span>${enc(p.amount||0)} ${enc(p.currency||'EUR')}</span></div><p class="muted">${enc(p.note||'Brak opisu zakresu')}</p><div class="sw-progress"><div style="width:${prog.percent}%"></div></div><p>${prog.done}/${prog.total} zadań gotowych (${prog.percent}%)</p><div class="command-actions">${button('Edytuj projekt',`swCloseWorkflow();swEdit('projects','${p.id}')`)}${button('Dodaj zadanie',`swCloseWorkflow();swProjectTask('${p.id}')`)}${p.leadId?button('Otwórz leada',`swOpenEntity('leads','${p.leadId}')`):''}</div><h3>Zadania projektu</h3>${related.map(t=>`<div class="sw-related"><div><strong>${enc(t.name)}</strong><small>${enc(taskStatus(t))} · ${enc(t.owner)}</small></div>${button('Otwórz zadanie',`swOpenEntity('tasks','${t.id}')`)}</div>`).join('')||'<p class="muted">Nie ma jeszcze powiązanych zadań.</p>'}<div class="command-actions">${button('Wróć','swCloseWorkflow();swWorkflowReturn()')}</div>`)}
 window.swWorkflowFilter=v=>{teamFilter=v;render()};
 function filterBar(){return `<div class="sw-filter"><label for="swOperatorFilter">Widok operatora</label><select id="swOperatorFilter" onchange="swWorkflowFilter(this.value)"><option value="mine" ${teamFilter==='mine'?'selected':''}>Moje / do zatwierdzenia</option><option value="team" ${teamFilter==='team'?'selected':''}>Cały zespół</option></select></div>`}
-function taskCard(t){const st=taskStatus(t),p=projFor(t);return `<div class="sw-ticket" tabindex="0" role="button" onclick="swOpenEntity('tasks','${t.id}')" onkeydown="if(event.key==='Enter')swOpenEntity('tasks','${t.id}')"><strong>${enc(t.name)}</strong><small>${enc(t.owner||'—')} · ${dateLabel(t.due)} ${t.priority==='Wysoki'?'· HIGH':''}</small>${p?`<small>Projekt: ${enc(p.name)}</small>`:''}${t.blockedReason?`<small class="sw-warning">ZABLOKOWANE: ${enc(t.blockedReason)}</small>`:''}<div class="command-actions" onclick="event.stopPropagation()">${st==='Do zrobienia'?button('Rozpocznij',`swWorkflowStatus('${t.id}','W trakcie')`):''}${st==='W trakcie'?button('Do sprawdzenia',`swWorkflowStatus('${t.id}','Do sprawdzenia')`):''}${st==='Do sprawdzenia'?button('Zatwierdź',`swWorkflowStatus('${t.id}','Gotowe')`)+button('Poprawki',`swWorkflowStatus('${t.id}','W trakcie')`):''}${button('Szczegóły',`swOpenEntity('tasks','${t.id}')`)}</div></div>`}
-function board(arr){return `<div class="sw-board">${taskStages.map(st=>`<section class="sw-board-col"><h3>${st.toUpperCase()} <span>${arr.filter(t=>taskStatus(t)===st).length}</span></h3>${arr.filter(t=>taskStatus(t)===st).map(taskCard).join('')||'<p class="muted">Brak zadań</p>'}</section>`).join('')}</div>`}
+function taskCard(t){
+ const st=taskStatus(t),p=projFor(t),id=enc(t.id);
+ const stageOptions=taskStages.map(x=>`<option value="${enc(x)}" ${x===st?'selected':''}>${enc(x)}</option>`).join('');
+ return `<div class="sw-ticket" draggable="true" data-task-id="${id}" tabindex="0" role="button" aria-label="Zadanie ${enc(t.name)}. Przeciągnij do innej kolumny lub zmień status na liście." onclick="swOpenEntity('tasks','${id}')" onkeydown="if(event.key==='Enter')swOpenEntity('tasks','${id}')"><div class="sw-drag-handle" aria-hidden="true">⠿</div><strong>${enc(t.name)}</strong><small>${enc(t.owner||'—')} · ${dateLabel(t.due)} ${t.priority==='Wysoki'?'· HIGH':''}</small>${p?`<small>Projekt: ${enc(p.name)}</small>`:''}${t.blockedReason?`<small class="sw-warning">ZABLOKOWANE: ${enc(t.blockedReason)}</small>`:''}<div class="command-actions" onclick="event.stopPropagation()"><label class="sw-move-label">Status <select class="sw-stage-select" aria-label="Status zadania ${enc(t.name)}" onchange="swWorkflowStatus('${id}',this.value)">${stageOptions}</select></label>${button('Szczegóły',`swOpenEntity('tasks','${id}')`)}</div></div>`;
+}
+function board(arr){return `<div class="sw-board" aria-label="Tablica zadań. Przeciągnij zadanie do wybranej kolumny.">${taskStages.map(st=>`<section class="sw-board-col" data-stage="${enc(st)}" aria-label="Kolumna ${enc(st)}"><h3>${st.toUpperCase()} <span>${arr.filter(t=>taskStatus(t)===st).length}</span></h3>${arr.filter(t=>taskStatus(t)===st).map(taskCard).join('')||'<p class="muted">Brak zadań</p>'}</section>`).join('')}</div>`}
+// Native HTML5 drag/drop: same mutation path as the status select and detail panel.
+// Event delegation survives rerenders; no extra library or database migration.
+let draggingTaskId=null;
+document.addEventListener('dragstart',event=>{
+ const ticket=event.target.closest?.('.sw-ticket[data-task-id]');if(!ticket)return;
+ draggingTaskId=ticket.dataset.taskId;
+ if(event.dataTransfer){event.dataTransfer.effectAllowed='move';event.dataTransfer.setData('text/plain',draggingTaskId)}
+ ticket.classList.add('sw-dragging');
+});
+document.addEventListener('dragover',event=>{
+ const col=event.target.closest?.('.sw-board-col[data-stage]');if(!col||!draggingTaskId)return;
+ event.preventDefault();if(event.dataTransfer)event.dataTransfer.dropEffect='move';
+ document.querySelectorAll('.sw-board-col.sw-drop-target').forEach(x=>{if(x!==col)x.classList.remove('sw-drop-target')});
+ col.classList.add('sw-drop-target');
+});
+document.addEventListener('drop',event=>{
+ const col=event.target.closest?.('.sw-board-col[data-stage]');
+ if(!col||!draggingTaskId)return;
+ event.preventDefault();const id=draggingTaskId;draggingTaskId=null;
+ document.querySelectorAll('.sw-drop-target,.sw-dragging').forEach(x=>x.classList.remove('sw-drop-target','sw-dragging'));
+ window.swWorkflowStatus(id,col.dataset.stage);
+});
+document.addEventListener('dragend',()=>{
+ draggingTaskId=null;document.querySelectorAll('.sw-drop-target,.sw-dragging').forEach(x=>x.classList.remove('sw-drop-target','sw-dragging'));
+});
 function renderTasks(){ $('content').innerHTML=heading('MISSIONS','Zadania','Jeden status zadania w każdym widoku. Przekaż, zatwierdź lub odeślij do poprawek.')+filterBar()+`<div class="command-actions"><button class="btn" onclick="swNew('tasks')">+ NOWE ZADANIE</button></div>`+board(tasks().filter(t=>!t.archivedAt).filter(isMine)) }
 function renderDelivery(){let arr=tasks().filter(t=>!t.archivedAt).filter(t=>t.projectId&&projects().some(p=>String(p.id)===String(t.projectId))).filter(isMine);$('content').innerHTML=heading('PRODUCTION','Delivery Board','Wyłącznie praca produkcyjna powiązana z projektami — zatwierdzenia, poprawki, blokady i deadline’y.')+filterBar()+board(arr)}
 function renderProjects(){let arr=projects().filter(p=>!p.archivedAt).filter(p=>teamFilter==='team'||p.owner===user);$('content').innerHTML=heading('PROJECT MANAGEMENT','Projekty','Zarządzaj zakresem, budżetem i terminami. Procent postępu wynika z zadań, nie ze statusu projektu.')+filterBar()+`<div class="command-actions"><button class="btn" onclick="swNew('projects')">+ NOWY PROJEKT</button></div><div class="item-grid">${arr.map(p=>{let prog=projectProgress(p.id),lead=leads().find(l=>String(l.id)===String(p.leadId));return `<article class="card sw-project" role="button" tabindex="0" onclick="swOpenEntity('projects','${p.id}')" onkeydown="if(event.key==='Enter')swOpenEntity('projects','${p.id}')"><div class="eyebrow">${enc(p.status||'Brief')} / ${enc(p.market||'PL')}</div><h2>${enc(p.name)}</h2><p class="muted">${enc(lead?.name||p.client||'Bez przypisanego klienta')}</p><div class="sw-progress"><div style="width:${prog.percent}%"></div></div><div class="sw-facts"><span>${prog.done}/${prog.total} zadań</span><span>${prog.percent}%</span><span>${enc(p.owner||'—')}</span><span>${dateLabel(p.due)}</span></div><p>${enc(p.amount||0)} ${enc(p.currency||'EUR')}</p>${button('Otwórz projekt',`event.stopPropagation();swOpenEntity('projects','${p.id}')`)}</article>`}).join('')||'<p class="muted">Nie ma projektów przypisanych do tego widoku.</p>'}</div>`}
