@@ -27,52 +27,63 @@ function loadSnapshot(rows){baseline=new Map();versions=new Map();const state=st
 loadCloud=async function(){const {data:{user:authUser},error:authError}=await client.auth.getUser();if(authError||!authUser)throw Error('Brak ważnej sesji');accountId=authUser.id;const pending=localStorage.getItem(localKey());if(pending){blocked=true;lastError='Znaleziono niezapisane zmiany z wcześniejszej sesji. Pobierz kopię i zdecyduj, jak je odzyskać.';status('CLOUD / RECOVERY REQUIRED','error');showConflict();throw Error('Wykryto niezapisane zmiany z wcześniejszej sesji. Najpierw zabezpiecz kopię.')}const rows=await fetchAll();loadSnapshot(rows);changed=false;blocked=false;status('CLOUD / SYNCHRONIZED','saved');if(!refreshTimer)refreshTimer=setInterval(()=>{if(cloudActive&&!changed&&!saving&&!blocked)void refreshRemote(false)},12000);if(!realtimeChannel){realtimeChannel=client.channel('sw-record-events').on('postgres_changes',{event:'*',schema:'public',table:'sw_records'},()=>{if(cloudActive&&!changed&&!saving&&!blocked)void refreshRemote(false)}).subscribe()}};
 async function refreshRemote(force){if((saving||changed||blocked)&&!force)return;try{const rows=await fetchAll();if((saving||changed||blocked)&&!force)return;loadSnapshot(rows);status('CLOUD / SYNCHRONIZED','saved');try{render()}catch(e){console.error('Render failed',e)}}catch(e){lastError=e.message;status('CLOUD / READ ERROR','error')}}
 function changesSince(){const current=indexState(db),changes=[];for(const [k,v] of current){const encoded=JSON.stringify(v.payload);if(baseline.get(k)!==encoded)changes.push({...v,expected:versions.get(k)||0,deleted:false})}for(const [k,encoded] of baseline){if(!current.has(k)){const [collection,id]=k.split(sep);changes.push({collection,id,payload:JSON.parse(encoded),expected:versions.get(k)||0,deleted:true})}}return changes}
+// Canonical values: JSONB may reorder keys after the DB writes a payload.
+function canon(value){
+ if(Array.isArray(value))return value.map(canon);
+ if(value&&typeof value==='object')return Object.fromEntries(Object.keys(value).sort().map(k=>[k,canon(value[k])]));
+ return value;
+}
+function samePayload(a,b){return JSON.stringify(canon(a))===JSON.stringify(canon(b))}
+async function verifyPersisted(change,expectedRevision){
+ const {data,error}=await client.from('sw_records')
+  .select('collection,record_id,payload,revision,deleted')
+  .eq('collection',change.collection).eq('record_id',change.id).maybeSingle();
+ if(error)throw Error('Odczyt kontrolny Supabase: '+error.message);
+ if(!data||Number(data.revision)!==Number(expectedRevision)||Boolean(data.deleted)!==Boolean(change.deleted)
+   ||!samePayload(data.payload,change.payload)){
+  throw Error('Zapis niezgodny z odczytem Supabase: '+change.collection+'/'+change.id+' (oczekiwano rev '+expectedRevision+', odczyt '+(data?.revision??'brak')+')');
+ }
+ return data;
+}
 async function flush(){
  if(!cloudActive||saving||blocked)return;
  saving=true;status('CLOUD / SAVING…','pending');
  try{
+  // The task itself is committed first, independently of analytics or activity
+  // records that might be malformed in an older installation.
   while(true){
-   // Do not permit an in-flight Realtime poll to replace unconfirmed changes.
    changed=false;
-   const pending=changesSince();
+   const pending=changesSince().sort((a,b)=>(a.collection==='tasks'? -1:0)-(b.collection==='tasks'? -1:0));
    if(!pending.length){
-    clearRecovery();lastError='';status('CLOUD / SAVED ✓','saved');settleSaves(null);break;
+    clearRecovery();lastError='';status('CLOUD / VERIFIED ✓','saved');settleSaves(null);break;
    }
-   for(let i=0;i<pending.length;i+=60){
-    const batch=pending.slice(i,i+60);
-    const {data,error}=await client.rpc('sw_apply_changes',{p_changes:batch});
-    if(error)throw error;
-    if(!Array.isArray(data)||data.length!==batch.length)throw Error('Supabase nie potwierdził wszystkich rekordów');
-    for(const submitted of batch){
-     const ack=data.find(x=>x.collection===submitted.collection&&String(x.id)===String(submitted.id));
-     if(!ack||!Number.isInteger(Number(ack.revision)))throw Error('Brak potwierdzenia rekordu '+submitted.collection+'/'+submitted.id);
-     const k=key(submitted.collection,submitted.id);
-     versions.set(k,Number(ack.revision));
-     if(submitted.deleted)baseline.delete(k);
-     else baseline.set(k,JSON.stringify(submitted.payload));
-    }
+   for(const submitted of pending){
+    const {data,error}=await client.rpc('sw_apply_changes',{p_changes:[submitted]});
+    if(error)throw Error(submitted.collection+'/'+submitted.id+': '+error.message);
+    const ack=Array.isArray(data)?data.find(x=>x.collection===submitted.collection&&String(x.id)===String(submitted.id)):null;
+    if(!ack||!Number.isInteger(Number(ack.revision)))throw Error('Brak odpowiedzi RPC dla '+submitted.collection+'/'+submitted.id);
+    // Do not claim SAVED just because RPC returned an acknowledgement.
+    await verifyPersisted(submitted,Number(ack.revision));
+    const k=key(submitted.collection,submitted.id);
+    versions.set(k,Number(ack.revision));
+    if(submitted.deleted)baseline.delete(k);
+    else baseline.set(k,JSON.stringify(submitted.payload));
     recovery();
    }
-   // If a second action occurred while the request was in flight, this checks
-   // its new snapshot before confirming that anything is finally SAVED.
-   if(!changed&&!changesSince().length){
-    clearRecovery();lastError='';status('CLOUD / SAVED ✓','saved');settleSaves(null);break;
+   if(!changesSince().length){
+    clearRecovery();lastError='';status('CLOUD / VERIFIED ✓','saved');settleSaves(null);break;
    }
   }
  }catch(e){
   changed=true;
-  blocked=/conflict|revision|duplicate key/i.test(e.message||'');
-  lastError=e.message||'Nieznany błąd';
-  recovery();
-  status(blocked?'CLOUD / CONFLICT':'CLOUD / ERROR · RETRY','error');
+  // A failed write must never silently refresh the stale server snapshot.
+  blocked=true;
+  lastError=e.message||'Nieznany błąd';recovery();
+  status('CLOUD / SAVE FAILED','error');
   settleSaves(new Error(lastError));
-  if(blocked)showConflict();
-  else notify('Zapis nieudany: '+lastError+'. Kliknij status CLOUD, aby ponowić.');
- }finally{
-  saving=false;
-  // A new save may have been issued as the previous request completed.
-  if(changed&&!blocked&&saveWaiters.length)queueMicrotask(()=>void flush());
- }
+  console.error('[SiteWarrior CLOUD] Niepotwierdzony zapis:',lastError);
+  showConflict();
+ }finally{saving=false;}
 }
 save=function(){
  if(!cloudActive){
@@ -89,6 +100,8 @@ save=function(){
  return promise;
 };
 window.swCloudLastError=()=>lastError;
+window.swCloudBuild='8.4.0';
+window.swCloudDebug=()=>({active:cloudActive,saving,changed,blocked,lastError,pending:changesSince().map(x=>({collection:x.collection,id:x.id,expected:x.expected})),taskRows:db.tasks?.length||0});
 window.swCloudPending=()=>saving||changed||blocked;
 window.swRetryCloud=()=>{blocked=false;void flush()};
 window.swRemoteRefresh=()=>refreshRemote(false);
