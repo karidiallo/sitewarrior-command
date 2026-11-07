@@ -16,26 +16,38 @@ const dateLabel=d=>d?enc(d):'Bez terminu';
 const projFor=t=>projects().find(p=>String(p.id)===String(t.projectId));
 function projectProgress(id){const arr=tasks().filter(t=>String(t.projectId)===String(id));return {total:arr.length,done:arr.filter(isDone).length,percent:arr.length?Math.round(100*arr.filter(isDone).length/arr.length):0}}
 function button(label,action,primary=false){return `<button class="mini-btn ${primary?'sw-prime':''}" onclick="${action}">${label}</button>`}
-function flash(message,kind,id){let el=$('swResultToast');if(!el){el=document.createElement('div');el.id='swResultToast';el.className='sw-result-toast';document.body.appendChild(el)}const saved=cloudActive?'Wysłano do synchronizacji — sprawdź CLOUD / SAVED':'Zapisano lokalnie';el.innerHTML=`<strong>${enc(message)}</strong><small>${enc(saved)}</small><div class="command-actions">${kind?button('Otwórz element',`swOpenEntity('${kind}','${id}')`):''}${button('Zamknij',`document.getElementById('swResultToast')?.remove()`)}</div>`}
+function flash(message,kind,id){let el=$('swResultToast');if(!el){el=document.createElement('div');el.id='swResultToast';el.className='sw-result-toast';document.body.appendChild(el)}const saved=cloudActive?'ZMIANA LOKALNA · Oczekuje na CLOUD / SAVED. Przy CLOUD / ERROR nie odświeżaj strony.':'Zapisano lokalnie';el.innerHTML=`<strong>${enc(message)}</strong><small>${enc(saved)}</small><div class="command-actions">${kind?button('Otwórz element',`swOpenEntity('${kind}','${id}')`):''}${button('Zamknij',`document.getElementById('swResultToast')?.remove()`)}</div>`}
 function addHistory(t,from,to,comment){t.reviewNotes??=[];t.reviewNotes.push({id:crypto.randomUUID(),at:iso(),by:user,from,to,comment:comment||''});if(t.reviewNotes.length>300)t.reviewNotes=t.reviewNotes.slice(-300);}
 function commitTask(t,to,comment=''){
-const from=taskStatus(t);if(from===to&&!comment)return;
-t.status=to;t.done=to==='Gotowe';t.updatedAt=iso();t.updatedBy=user;
-addHistory(t,from,to,comment);
-if(to==='Gotowe'&&!t.rewarded){t.rewarded=true;db.xp[t.owner]=(db.xp[t.owner]||0)+(t.priority==='Wysoki'?70:40)}
-activity('workflow',`${user}: ${t.name} · ${from} → ${to}${comment?' · '+comment:''}`);
-save();render();flash(`Zadanie: ${from} → ${to}`,'tasks',t.id);
+ const from=taskStatus(t);
+ if(from===to&&!comment)return false;
+ t.status=to;t.done=to==='Gotowe';t.updatedAt=iso();t.updatedBy=user;
+ addHistory(t,from,to,comment);
+ if(to==='Gotowe'&&!t.rewarded){t.rewarded=true;db.xp[t.owner]=(db.xp[t.owner]||0)+(t.priority==='Wysoki'?70:40)}
+ activity('workflow',`${user}: ${t.name} · ${from} → ${to}${comment?' · '+comment:''}`);
+ // Save exactly this record change through the existing per-record cloud pipeline.
+ // Never report a server confirmation before the cloud status actually says SAVED.
+ save();render();flash(`Przeniesiono: ${from} → ${to}`,'tasks',t.id);
+ return true;
 }
 window.swWorkflowStatus=(id,to)=>{
-const t=tasks().find(x=>String(x.id)===String(id));if(!t||!taskStages.includes(to))return;
-if(to==='Do sprawdzenia'){
-const reviewer=prompt('Kto ma zatwierdzić zadanie? Kari lub Adi',t.reviewer||(t.owner==='Kari'?'Adi':'Kari'));
-if(reviewer===null){render();return}if(!['Kari','Adi'].includes(reviewer)){notify('Wybierz Kari lub Adi');render();return}t.reviewer=reviewer;
-}
-if(to==='W trakcie'&&taskStatus(t)==='Do sprawdzenia'){
-const reason=prompt('Co wymaga poprawy? Podaj konkretny komentarz.');if(reason===null){render();return}if(!reason.trim()){notify('Wpisz komentarz do poprawek');render();return}commitTask(t,to,reason.trim());return;
-}
-commitTask(t,to);
+ const t=tasks().find(x=>String(x.id)===String(id));
+ if(!t){notify('Nie znaleziono zadania — nie zapisano zmiany');return false}
+ if(!taskStages.includes(to)){notify('Nieznany etap — nie zapisano zmiany');return false}
+ if(taskStatus(t)===to)return true;
+ if(to==='Do sprawdzenia'){
+  const reviewer=prompt('Kto ma zatwierdzić zadanie? Kari lub Adi',t.reviewer||(t.owner==='Kari'?'Adi':'Kari'));
+  if(reviewer===null){render();return false}
+  if(!['Kari','Adi'].includes(reviewer)){notify('Wybierz Kari lub Adi');render();return false}
+  t.reviewer=reviewer;
+ }
+ if(to==='W trakcie'&&taskStatus(t)==='Do sprawdzenia'){
+  const reason=prompt('Co wymaga poprawy? Podaj konkretny komentarz.');
+  if(reason===null){render();return false}
+  if(!reason.trim()){notify('Wpisz komentarz do poprawek');render();return false}
+  return commitTask(t,to,reason.trim());
+ }
+ return commitTask(t,to);
 };
 window.swWorkflowReturn=()=>navigate(previousView||'dashboard');
 window.swOpenEntity=(kind,id)=>{
@@ -57,12 +69,17 @@ function taskCard(t){
  return `<div class="sw-ticket" draggable="true" data-task-id="${id}" tabindex="0" role="button" aria-label="Zadanie ${enc(t.name)}. Przeciągnij do innej kolumny lub zmień status na liście." onclick="swOpenEntity('tasks','${id}')" onkeydown="if(event.key==='Enter')swOpenEntity('tasks','${id}')"><div class="sw-drag-handle" aria-hidden="true">⠿</div><strong>${enc(t.name)}</strong><small>${enc(t.owner||'—')} · ${dateLabel(t.due)} ${t.priority==='Wysoki'?'· HIGH':''}</small>${p?`<small>Projekt: ${enc(p.name)}</small>`:''}${t.blockedReason?`<small class="sw-warning">ZABLOKOWANE: ${enc(t.blockedReason)}</small>`:''}<div class="command-actions" onclick="event.stopPropagation()"><label class="sw-move-label">Status <select class="sw-stage-select" aria-label="Status zadania ${enc(t.name)}" onchange="swWorkflowStatus('${id}',this.value)">${stageOptions}</select></label>${button('Szczegóły',`swOpenEntity('tasks','${id}')`)}</div></div>`;
 }
 function board(arr){return `<div class="sw-board" aria-label="Tablica zadań. Przeciągnij zadanie do wybranej kolumny.">${taskStages.map(st=>`<section class="sw-board-col" data-stage="${enc(st)}" aria-label="Kolumna ${enc(st)}"><h3>${st.toUpperCase()} <span>${arr.filter(t=>taskStatus(t)===st).length}</span></h3>${arr.filter(t=>taskStatus(t)===st).map(taskCard).join('')||'<p class="muted">Brak zadań</p>'}</section>`).join('')}</div>`}
-// Native HTML5 drag/drop: same mutation path as the status select and detail panel.
-// Event delegation survives rerenders; no extra library or database migration.
+// One canonical transition handler for drag & drop, the select and detail actions.
+// A highlighted destination is *not* a completed move. Only a successful drop
+// may mutate the task; the server then independently confirms persistence.
 let draggingTaskId=null;
+let dropCompleted=false;
+function clearDragState(){
+ document.querySelectorAll('.sw-drop-target,.sw-dragging').forEach(x=>x.classList.remove('sw-drop-target','sw-dragging'));
+}
 document.addEventListener('dragstart',event=>{
  const ticket=event.target.closest?.('.sw-ticket[data-task-id]');if(!ticket)return;
- draggingTaskId=ticket.dataset.taskId;
+ draggingTaskId=ticket.dataset.taskId;dropCompleted=false;
  if(event.dataTransfer){event.dataTransfer.effectAllowed='move';event.dataTransfer.setData('text/plain',draggingTaskId)}
  ticket.classList.add('sw-dragging');
 });
@@ -75,12 +92,18 @@ document.addEventListener('dragover',event=>{
 document.addEventListener('drop',event=>{
  const col=event.target.closest?.('.sw-board-col[data-stage]');
  if(!col||!draggingTaskId)return;
- event.preventDefault();const id=draggingTaskId;draggingTaskId=null;
- document.querySelectorAll('.sw-drop-target,.sw-dragging').forEach(x=>x.classList.remove('sw-drop-target','sw-dragging'));
- window.swWorkflowStatus(id,col.dataset.stage);
+ event.preventDefault();event.stopPropagation();
+ const id=draggingTaskId,to=col.dataset.stage;
+ draggingTaskId=null;clearDragState();
+ // The transition function owns validation, UI rerender and cloud persistence.
+ dropCompleted=window.swWorkflowStatus(id,to)===true;
+ if(!dropCompleted)notify('Przenoszenie anulowane — status zadania nie został zmieniony');
 });
 document.addEventListener('dragend',()=>{
- draggingTaskId=null;document.querySelectorAll('.sw-drop-target,.sw-dragging').forEach(x=>x.classList.remove('sw-drop-target','sw-dragging'));
+ const wasDragging=!!draggingTaskId;
+ draggingTaskId=null;clearDragState();
+ if(wasDragging&&!dropCompleted)notify('Nie upuszczono zadania w kolumnie. Użyj listy „Status” na karcie.');
+ dropCompleted=false;
 });
 function renderTasks(){ $('content').innerHTML=heading('MISSIONS','Zadania','Jeden status zadania w każdym widoku. Przekaż, zatwierdź lub odeślij do poprawek.')+filterBar()+`<div class="command-actions"><button class="btn" onclick="swNew('tasks')">+ NOWE ZADANIE</button></div>`+board(tasks().filter(t=>!t.archivedAt).filter(isMine)) }
 function renderDelivery(){let arr=tasks().filter(t=>!t.archivedAt).filter(t=>t.projectId&&projects().some(p=>String(p.id)===String(t.projectId))).filter(isMine);$('content').innerHTML=heading('PRODUCTION','Delivery Board','Wyłącznie praca produkcyjna powiązana z projektami — zatwierdzenia, poprawki, blokady i deadline’y.')+filterBar()+board(arr)}
