@@ -19,6 +19,7 @@ function button(label,action,primary=false){return `<button class="mini-btn ${pr
 function flash(message,kind,id){let el=$('swResultToast');if(!el){el=document.createElement('div');el.id='swResultToast';el.className='sw-result-toast';document.body.appendChild(el)}const saved=cloudActive?'ZMIANA LOKALNA · Oczekuje na CLOUD / SAVED. Przy CLOUD / ERROR nie odświeżaj strony.':'Zapisano lokalnie';el.innerHTML=`<strong>${enc(message)}</strong><small>${enc(saved)}</small><div class="command-actions">${kind?button('Otwórz element',`swOpenEntity('${kind}','${id}')`):''}${button('Zamknij',`document.getElementById('swResultToast')?.remove()`)}</div>`}
 function addHistory(t,from,to,comment){t.reviewNotes??=[];t.reviewNotes.push({id:crypto.randomUUID(),at:iso(),by:user,from,to,comment:comment||''});if(t.reviewNotes.length>300)t.reviewNotes=t.reviewNotes.slice(-300);}
 function commitTask(t,to,comment=''){
+ if(cloudConfigured&&!cloudActive){notify('Brak aktywnej sesji Supabase — zmiana nie została wykonana');return false;}
  const from=taskStatus(t);
  if(from===to&&!comment)return false;
  t.status=to;t.done=to==='Gotowe';t.updatedAt=iso();t.updatedBy=user;
@@ -29,10 +30,10 @@ function commitTask(t,to,comment=''){
  // Never report a server confirmation before the cloud status actually says SAVED.
  const saved=save();
  render();
- flash(`Przeniesiono lokalnie: ${from} → ${to}`,'tasks',t.id);
+ flash(`Przeniesiono: ${from} → ${to}`,'tasks',t.id);
  Promise.resolve(saved).then(()=>{
   const el=document.getElementById('swResultToast');
-  if(el)el.querySelector('small').textContent=cloudActive?'POTWIERDZONE W SUPABASE · '+to:'ZAPISANO LOKALNIE · '+to;
+  if(el)el.querySelector('small').textContent=cloudActive?'ZWERYFIKOWANO W BAZIE · '+to:'ZAPISANO LOKALNIE · '+to;
  }).catch(e=>{
   const el=document.getElementById('swResultToast');
   if(el){el.querySelector('strong').textContent='BŁĄD ZAPISU · '+to;el.querySelector('small').textContent=e.message+' — zmiany zachowane lokalnie. Kliknij CLOUD / ERROR.'}
