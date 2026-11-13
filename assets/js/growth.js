@@ -9,9 +9,10 @@
   const now = () => new Date().toISOString();
   const today = (date = new Date()) => [date.getFullYear(), String(date.getMonth() + 1).padStart(2, '0'), String(date.getDate()).padStart(2, '0')].join('-');
   const uid = () => globalThis.crypto?.randomUUID?.() || 'batch-' + Date.now() + '-' + Math.random().toString(36).slice(2, 9);
-  const regions = ['Europa', 'APAC', 'Afryka', 'Ameryka Północna', 'Ameryka Łacińska', 'Bliski Wschód', 'Inne'];
-  const channels = ['Instagram', 'WhatsApp', 'Email', 'LinkedIn', 'Inne'];
-  const regionFromMarket = market => ({PL:'Europa',NO:'Europa',FR:'Europa',DE:'Europa',UK:'Europa',USCA:'Ameryka Północna',AF:'Afryka',APAC:'APAC'})[market] || '';
+  const regions = ['Europa', 'Asia', 'North America', 'Africa'];
+  const normalizeRegion = value => ({'APAC':'Asia','Azja':'Asia','Afryka':'Africa','Ameryka Północna':'North America','Europe':'Europa','Bliski Wschód':'Asia'})[value] || value || 'Europa';
+  const channels = ['WhatsApp', 'Instagram', 'Email', 'LinkedIn', 'Inne'];
+  const regionFromMarket = market => ({PL:'Europa',NO:'Europa',FR:'Europa',DE:'Europa',UK:'Europa',USCA:'North America',AF:'Africa',APAC:'Asia'})[market] || '';
   const activeBatches = data => (data.leadActivities || []).filter(a => a.type === 'outreach_batch' && !a.archivedAt);
   const allBatches = data => (data.leadActivities || []).filter(a => a.type === 'outreach_batch');
   const batchDate = a => a.occurredOn || String(a.at || '').slice(0,10);
@@ -50,7 +51,7 @@
       const n = Number(a.count || 0);
       if (!Number.isFinite(n) || n < 1) continue;
       outreach += n;
-      byRegion[a.region] = (byRegion[a.region] || 0) + n;
+      const regionKey = normalizeRegion(a.region); byRegion[regionKey] = (byRegion[regionKey] || 0) + n;
       byChannel[a.channel] = (byChannel[a.channel] || 0) + n;
       byOperator[a.owner] = (byOperator[a.owner] || 0) + n;
     }
@@ -132,8 +133,8 @@
     window.SWLite.openDialog(editing?'Popraw sesję outreach':'Zapisz wykonany outreach',`<p class="lite-modal-intro">Jeden wpis = liczba rzeczywiście wysłanych pierwszych wiadomości. Bez listy firm i bez tworzenia leadów.</p>
       <form class="fields">
         <label>Ile wiadomości wysłaliście?<input type="number" min="1" max="10000" step="1" name="count" required value="${editing?safe(batch.count):''}" placeholder="np. 40"></label>
-        <label>Region<select name="region">${opt(regions,batch?.region||'Europa')}</select></label>
-        <label>Kanał<select name="channel">${opt(channels,batch?.channel||'Instagram')}</select></label>
+        <label>Region<select name="region">${opt(regions,normalizeRegion(batch?.region)||'Europa')}</select></label>
+        <label>Kanał<select name="channel">${opt(channels,batch?.channel||'WhatsApp')}</select></label>
         <label>Data wysyłki<input type="date" name="occurredOn" required max="${today()}" value="${safe(batch?.occurredOn||today())}"></label>
         <details class="lite-advanced"><summary>Doprecyzuj kraj (opcjonalnie)</summary><label>Kraj<input maxlength="100" name="country" placeholder="np. Norwegia" value="${safe(batch?.country||'')}"></label></details>
         <div class="lite-form-footer"><span>${editing?'Poprawka nie przyznaje nowego XP.':`Operator: <strong>${safe(user||'—')}</strong> · max 100 XP/dzień za outreach`}</span><button class="btn" type="submit">${editing?'Zapisz korektę':'Zapisz outreach'}</button></div>
@@ -151,7 +152,7 @@
       <div class="growth-two-cols"><section class="lite-surface"><div class="lite-section-heading"><h2>Regiony</h2><span class="lite-overline">WOLUMEN</span></div>${barList(s.byRegion,s.outreach)}</section>
       <section class="lite-surface"><div class="lite-section-heading"><h2>Kanały</h2><span class="lite-overline">IG / WA / EMAIL</span></div>${barList(s.byChannel,s.outreach)}</section></div>
       <section class="lite-surface"><div class="lite-section-heading"><div><span class="lite-overline">RECENT ACTIVITY</span><h2>Zapisane sesje</h2></div><span class="lite-footnote">Najpierw najnowsze</span></div>
-      ${last.slice(0,100).map(a=>`<div class="growth-log-row"><div class="growth-count">${num(a.count)}</div><div class="growth-entry"><strong>${safe(a.region)} · ${safe(a.channel)}${a.country?' · '+safe(a.country):''}</strong><small>${safe(batchDate(a))} · ${safe(a.owner||'—')}${a.xpAwarded?' · +'+num(a.xpAwarded)+' XP':''}</small></div><div class="growth-log-actions">${action('edit','Edytuj',a.id)}${action('archive','Archiwizuj',a.id)}</div></div>`).join('')||'<div class="lite-empty"><strong>Nie ma jeszcze logów.</strong><p>Po wysłaniu wiadomości zapisz liczbę, region i kanał w jednym wpisie.</p></div>'}
+      ${last.slice(0,100).map(a=>`<div class="growth-log-row"><div class="growth-count">${num(a.count)}</div><div class="growth-entry"><strong>${safe(normalizeRegion(a.region))} · ${safe(a.channel)}${a.country?' · '+safe(a.country):''}</strong><small>${safe(batchDate(a))} · ${safe(a.owner||'—')}${a.xpAwarded?' · +'+num(a.xpAwarded)+' XP':''}</small></div><div class="growth-log-actions">${action('edit','Edytuj',a.id)}${action('archive','Usuń',a.id)}</div></div>`).join('')||'<div class="lite-empty"><strong>Nie ma jeszcze logów.</strong><p>Po wysłaniu wiadomości zapisz liczbę, region i kanał w jednym wpisie.</p></div>'}
       ${last.length>100?`<p class="lite-footnote">Pokazano 100 z ${last.length} sesji. Statystyki obejmują wszystkie.</p>`:''}
       <p class="lite-footnote">Wpisy typu „outreach batch” są niezależne od CRM. Historyczne pojedyncze aktywności zostały zachowane, ale nie są automatycznie doliczane do nowego licznika — unikamy podwójnego liczenia.</p></section>`;
   }
@@ -202,5 +203,5 @@
       case 'go-today':navigate('dashboard');break;
     }
   });
-  window.SWGrowth={regions,channels,dates,summary,createBatch,updateBatch,archiveBatch,renderOutreach,renderRadar,rewardSalesEvent,rewardWin,openForm:form};
+  window.SWGrowth={regions,normalizeRegion,channels,dates,summary,createBatch,updateBatch,archiveBatch,renderOutreach,renderRadar,rewardSalesEvent,rewardWin,openForm:form};
 })();
