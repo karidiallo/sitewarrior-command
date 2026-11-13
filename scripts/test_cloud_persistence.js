@@ -11,7 +11,7 @@ const rpc=async(name,args)=>{
  return {data:replies,error:null}
 };
 const auth={getUser:async()=>({data:{user:{id:'user-kari'}},error:null})};
-const query={select(){return this},order(){return this},range:async()=>({data:[...database.values()].map(x=>structuredClone(x)),error:null})};
+const query={filters:{},select(){this.filters={};return this},order(){return this},eq(key,value){this.filters[key]=value;return this},range:async()=>({data:[...database.values()].map(x=>structuredClone(x)),error:null}),maybeSingle:async function(){const match=[...database.values()].find(x=>Object.entries(this.filters).every(([k,v])=>x[k]===v));return {data:match?structuredClone(match):null,error:null}}};
 const nodes={};const body={append(el){nodes[el.id]=el},appendChild(el){nodes[el.id]=el}};
 const doc={body,getElementById(id){return nodes[id]||null},createElement(){return {id:'',style:{},dataset:{},addEventListener(){},setAttribute(){},remove(){},querySelector(){return {textContent:''}}}}};
 const window={addEventListener(){}};
