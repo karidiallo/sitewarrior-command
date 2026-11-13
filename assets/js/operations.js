@@ -1,7 +1,7 @@
 /* SiteWarrior v8: workflow consolidation and standalone outreach. Existing records are never migrated destructively. */
 (function(){
 'use strict';
-const $=id=>document.getElementById(id), E=x=>esc(String(x??'')), now=()=>new Date().toISOString(), uid=()=>crypto.randomUUID(), arr=k=>Array.isArray(db[k])?db[k]:(db[k]=[]);
+const $=id=>document.getElementById(id), E=x=>esc(String(x??'')), now=()=>new Date().toISOString(), uid=()=>(globalThis.crypto?.randomUUID?.() || 'sw-'+Date.now()+'-'+Math.random().toString(36).slice(2)), arr=k=>Array.isArray(db[k])?db[k]:(db[k]=[]);
 const isArchived=x=>!!x.archivedAt;
 const active=k=>arr(k).filter(x=>!isArchived(x));
 const kindLabels={tasks:'Zadanie',projects:'Projekt',leads:'Lead',leadActivities:'Outreach',marketing:'Marketing',subscriptions:'Subskrypcja',payments:'Płatność',expenses:'Wydatek',journal:'Notatka',weeklyReviews:'Weekly review'};
