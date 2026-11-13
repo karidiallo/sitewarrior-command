@@ -1,4 +1,4 @@
-// Regression tests for SiteWarrior v10 — sales only for interested leads.
+// Regression tests for SiteWarrior v11 — sales only for interested leads.
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
 const makeLead=(id,status,createdAt='2026-11-11T10:00:00Z',owner='Kari')=>({id,name:id,status,owner,createdAt});
 const data={leads:[makeLead('cold','Nowy'),makeLead('replied','Odpowiedź'),makeLead('offer','Oferta wysłana'),makeLead('blocked','Nie kontaktować'),makeLead('new','Zainteresowany')],
@@ -34,8 +34,8 @@ assert.equal(lite.unlinked().length,1,'Old standalone activities remain; batch e
 const weekly=growth.summary(data,'week',new Date('2026-11-13T12:00:00'));
 assert.equal(weekly.outreach,75);
 assert.equal(weekly.byRegion.Europa,40);
-assert.equal(weekly.byRegion.APAC,20);
-assert.equal(weekly.byRegion.Afryka,15);
+assert.equal(weekly.byRegion.Asia,20);
+assert.equal(weekly.byRegion.Africa,15);
 assert.equal(weekly.byChannel.WhatsApp,35);
 assert.equal(weekly.leads.length,3);
 assert.equal(weekly.received.length,1);
@@ -45,14 +45,14 @@ const present=new Date();const day=[present.getFullYear(),String(present.getMont
 const first=growth.createBatch({count:70,region:'Europa',channel:'Instagram',occurredOn:day,country:'Polska'},present);
 assert.ok(first);
 assert.equal(first.xpAwarded,70);
-const second=growth.createBatch({count:80,region:'APAC',channel:'WhatsApp',occurredOn:day,country:''},present);
+const second=growth.createBatch({count:80,region:'Asia',channel:'WhatsApp',occurredOn:day,country:''},present);
 assert.equal(second.xpAwarded,30,'XP capped at 100/day for operator');
 assert.equal(data.xp.Kari,100);
 assert.equal(data.leads.length,n0,'Logging outbound volume does NOT create a CRM lead');
 assert.equal(growth.createBatch({count:-1,region:'Europa',channel:'Instagram',occurredOn:day},present),false);
 assert.equal(growth.createBatch({count:2,region:'Atlantyda',channel:'Instagram',occurredOn:day},present),false);
 assert.equal(growth.createBatch({count:3,region:'Europa',channel:'Instagram',occurredOn:'2025-11-13'},present).xpAwarded,0,'Backfill does not grant XP');
-assert.equal(growth.updateBatch(first.id,{count:55,region:'Afryka',channel:'Email',occurredOn:day,country:'RPA'}),true);
+assert.equal(growth.updateBatch(first.id,{count:55,region:'Africa',channel:'Email',occurredOn:day,country:'RPA'}),true);
 assert.equal(data.xp.Kari,100,'Corrections do not mint new XP');
 assert.equal(lite.writeEvent('new','prototype'),true);
 assert.equal(data.leads.find(l=>l.id==='new').status,'Zainteresowany','Prototype is an activity, not a new stage');
