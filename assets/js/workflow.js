@@ -17,7 +17,7 @@ const projFor=t=>projects().find(p=>String(p.id)===String(t.projectId));
 function projectProgress(id){const arr=tasks().filter(t=>String(t.projectId)===String(id));return {total:arr.length,done:arr.filter(isDone).length,percent:arr.length?Math.round(100*arr.filter(isDone).length/arr.length):0}}
 function button(label,action,primary=false){return `<button class="mini-btn ${primary?'sw-prime':''}" onclick="${action}">${label}</button>`}
 function flash(message,kind,id){let el=$('swResultToast');if(!el){el=document.createElement('div');el.id='swResultToast';el.className='sw-result-toast';document.body.appendChild(el)}const saved=cloudActive?'ZMIANA LOKALNA · Oczekuje na CLOUD / SAVED. Przy CLOUD / ERROR nie odświeżaj strony.':'Zapisano lokalnie';el.innerHTML=`<strong>${enc(message)}</strong><small>${enc(saved)}</small><div class="command-actions">${kind?button('Otwórz element',`swOpenEntity('${kind}','${id}')`):''}${button('Zamknij',`document.getElementById('swResultToast')?.remove()`)}</div>`}
-function addHistory(t,from,to,comment){t.reviewNotes??=[];t.reviewNotes.push({id:crypto.randomUUID(),at:iso(),by:user,from,to,comment:comment||''});if(t.reviewNotes.length>300)t.reviewNotes=t.reviewNotes.slice(-300);}
+function addHistory(t,from,to,comment){t.reviewNotes??=[];t.reviewNotes.push({id:(globalThis.crypto?.randomUUID?.() || 'sw-'+Date.now()+'-'+Math.random().toString(36).slice(2)),at:iso(),by:user,from,to,comment:comment||''});if(t.reviewNotes.length>300)t.reviewNotes=t.reviewNotes.slice(-300);}
 function commitTask(t,to,comment=''){
  if(cloudConfigured&&!cloudActive){notify('Brak aktywnej sesji Supabase — zmiana nie została wykonana');return false;}
  const from=taskStatus(t);
