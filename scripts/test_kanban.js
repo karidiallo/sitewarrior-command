@@ -7,7 +7,7 @@ const classList={add(){},remove(){}};
 function col(stage){return {dataset:{stage},classList,closest(selector){return selector.includes('sw-board-col')?this:null}}}
 const ticket={dataset:{taskId:'t-1'},classList,closest(selector){return selector.includes('sw-ticket')?this:null}};
 const ctx={
- db,user:'Kari',view:'tasks',cloudActive:false,cloudConfigured:false,crypto:require('crypto').webcrypto,
+ db,user:'Kari',view:'tasks',cloudActive:false,cloudConfigured:false,/* intentionally no crypto.randomUUID: insecure-preview regression */
  document:{addEventListener:(name,fn)=>{handlers[name]=fn},getElementById:()=>null,querySelectorAll:()=>[],body:{appendChild(){}}},
  window:{}, render:()=>{renders++},save:()=>{saves++;return Promise.resolve(true)},
  esc:s=>s,heading:()=>'',navigate:()=>{},notify:()=>{},activity:(type,text)=>db.activity.push({type,text}),
