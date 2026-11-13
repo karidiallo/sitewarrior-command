@@ -7,16 +7,16 @@ const classList={add(){},remove(){}};
 function col(stage){return {dataset:{stage},classList,closest(selector){return selector.includes('sw-board-col')?this:null}}}
 const ticket={dataset:{taskId:'t-1'},classList,closest(selector){return selector.includes('sw-ticket')?this:null}};
 const ctx={
- db,user:'Kari',view:'tasks',cloudActive:false,crypto:require('crypto').webcrypto,
+ db,user:'Kari',view:'tasks',cloudActive:false,cloudConfigured:false,crypto:require('crypto').webcrypto,
  document:{addEventListener:(name,fn)=>{handlers[name]=fn},getElementById:()=>null,querySelectorAll:()=>[],body:{appendChild(){}}},
- window:{}, render:()=>{renders++},save:()=>{saves++},
+ window:{}, render:()=>{renders++},save:()=>{saves++;return Promise.resolve(true)},
  esc:s=>s,heading:()=>'',navigate:()=>{},notify:()=>{},activity:(type,text)=>db.activity.push({type,text}),
  prompt:()=> 'Adi', toggleTask:()=>{},console,Date,structuredClone,
 };
 ctx.window.swEdit=()=>{};
 vm.createContext(ctx);vm.runInContext(fs.readFileSync(__dirname+'/../assets/js/workflow.js','utf8'),ctx);
 // Mock flash - only commit triggers DOM creation; provide its necessary mini DOM.
-const fakeToast={innerHTML:'',className:'',style:{}};const fakeContent={innerHTML:''};
+const fakeToast={innerHTML:'',className:'',style:{},querySelector:()=>({textContent:''})};const fakeContent={innerHTML:''};
 ctx.document.getElementById=id=>id==='swResultToast'?fakeToast:id==='content'?fakeContent:null;
 ctx.document.createElement=()=>fakeToast;
 ctx.document.querySelectorAll=()=>[];
