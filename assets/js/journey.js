@@ -11,7 +11,7 @@
   const uid = () => globalThis.crypto?.randomUUID?.() || 'sw11-'+Date.now()+'-'+Math.random().toString(36).slice(2,10);
   const arr = key => Array.isArray(db[key]) ? db[key] : (db[key]=[]);
   const find = (key,id) => arr(key).find(x => String(x.id)===String(id));
-  const canWrite = () => {if(cloudConfigured&&!cloudActive){notify('Zaloguj się do Supabase przed zmianą danych');return false}return true};
+  const canWrite = () => {if(cloudConfigured&&!cloudActive){notify('Zaloguj się do Supabase przed zmianą danych');return false}if(window.swCloudDebug?.()?.blocked){notify('Zapis do chmury jest wstrzymany. Otwórz CLOUD / SAVE FAILED i rozwiąż konflikt.');return false}return true};
   const active = key => arr(key).filter(x=>!x.archivedAt);
   const url = input => {try {const v=new URL(String(input||''));return ['https:','http:'].includes(v.protocol)?v.href:''} catch{return ''}};
   const href=(input,label)=>{const v=url(input);return v?`<a class="j-link" href="${E(v)}" target="_blank" rel="noopener noreferrer">${E(label)} ↗</a>`:''};
@@ -47,16 +47,17 @@
   const taskStages=['Backlog','Do zrobienia','W trakcie','Do sprawdzenia','Gotowe'];
   const stageTask=t=>t.status==='W toku'?'W trakcie':(t.status|| (t.done?'Gotowe':'Do zrobienia'));
   const done=t=>stageTask(t)==='Gotowe';
+  // The pipeline is a projection of *confirmed* milestones, never a freehand
+  // status label. Older records may say "Call umówiony" without call_booked.
+  // Do not invent an event from that label: offer the missing confirmation.
   const leadStatus=l=>{
     if(!l)return 'Zainteresowany';
-    if(STAGES.includes(l.status)&&l.status!=='Klient')return l.status;
-    if(l.status==='Klient')return (hasPaidDeposit(l)&&step(l,'contract_signed'))?'Klient':'Umowa + płatność';
-    // Historical values cannot prove a discovery, contract signature or paid deposit.
-    if(l.status==='Wygrany')return (hasPaidDeposit(l)&&step(l,'contract_signed'))?'Klient':'Umowa + płatność';
-    if(l.status==='Zamknięty'||['Przegrany','Odłożony','Nie kontaktować'].includes(l.status))return 'Zamknięty';
-    if(l.status==='Finalizacja')return 'Umowa + płatność';
-    if(l.status==='Oferta')return 'Call odbyty';
-    if(l.status==='Discovery')return 'Call umówiony';
+    if(['Zamknięty','Przegrany','Odłożony','Nie kontaktować'].includes(l.status))return 'Zamknięty';
+    if(hasPaidDeposit(l)&&step(l,'contract_signed'))return 'Klient';
+    if(step(l,'contract_sent'))return 'Umowa + płatność';
+    if(step(l,'welcome_sent'))return 'Onboarding wysłany';
+    if(step(l,'call_attended'))return 'Call odbyty';
+    if(step(l,'call_booked'))return 'Call umówiony';
     return 'Zainteresowany';
   };
   const qualified=l=>!!l&&!l.archivedAt&&!['Nowy','Do kontaktu','Kontakt wysłany','Gotowy do kontaktu','Nie kontaktować'].includes(l.status);
@@ -107,16 +108,45 @@
   }
 
   function newLead(){if(!canWrite())return;openModal('Zainteresowany klient',`<p class="j-help">Dodaj dopiero po pozytywnej odpowiedzi, np. „sure”. Wysłane wiadomości są agregowane w Outreach Log.</p><form class="j-form"><div class="j-form-grid"><label>Firma / osoba *<input name="name" maxlength="180" required placeholder="np. Phoenix Pilates"></label><label>Opiekun<select name="owner">${options(['Kari','Adi'],user||'Kari')}</select></label><label>Region<select name="region">${options(regions,'Europa')}</select></label><label>Kraj (opcjonalnie)<input name="country" maxlength="100" placeholder="np. USA"></label><label>Kanał<select name="channel">${options(channels,'WhatsApp')}</select></label><label>Link do rozmowy / numer<input name="contactUrl" placeholder="https://wa.me/... lub numer"></label><label>Termin następnej akcji<input type="date" name="next"></label><label>Waluta<select name="currency">${options(['PLN','EUR','USD','GBP','NOK','ZAR','CAD'], 'EUR')}</select></label></div><label>Notatka / co odpowiedział klient<textarea name="note" rows="3" placeholder="Sure, let's talk…"></textarea></label><footer>${button('close-modal','Anuluj')}<button class="j-btn primary" type="submit">Dodaj do Sales</button></footer></form>`,data=>{const name=String(data.get('name')||'').trim();if(!name)return;const raw=String(data.get('contactUrl')||'').trim();const l={id:uid(),name,owner:data.get('owner'),region:data.get('region'),country:String(data.get('country')||'').trim(),channel:data.get('channel'),contactUrl:url(raw),phone:!url(raw)?raw:'',currency:data.get('currency'),status:'Zainteresowany',interestedAt:stamp(),createdAt:stamp(),next:data.get('next')||'',nextAction:'Umów discovery call',note:String(data.get('note')||''),journey:{}};arr('leads').push(l);recordEvent(l,'interested');closeModal();swSave('sales','Dodano zainteresowanego klienta: '+name);notify('Klient dodany — następny krok: umówić call')})}
-  function leadActions(l){const s=step.bind(null,l),paidDeposit=hasPaidDeposit(l);const items=[['call_booked','Call umówiony',true],['call_attended','Call się odbył',!!s('call_booked')],['prototype_shown','Pokazano prototyp',!!s('call_attended')],['welcome_sent','Welcome documents wysłane',!!s('prototype_shown')],['client_details','Dane do umowy otrzymane',!!s('welcome_sent')],['contract_sent','Umowa + link wysłane',!!s('client_details')],['contract_signed','Umowa podpisana',!!s('contract_sent')],['deposit_received','Zaliczka zaksięgowana',!!s('contract_signed')]];return items.map(([key,label,ready],i)=>`<div class="j-step ${s(key)||key==='deposit_received'&&paidDeposit?'complete':''} ${ready?'':'locked'}"><span class="j-stepindex">${s(key)||key==='deposit_received'&&paidDeposit?'✓':String(i+1).padStart(2,'0')}</span><div><strong>${E(label)}</strong><small>${s(key)?E(String(s(key)).slice(0,10)):key==='deposit_received'&&paidDeposit?'Wpływ potwierdzony':!ready?'Czeka na poprzedni krok':E(stepDefs[i][2])}</small></div>${s(key)||key==='deposit_received'&&paidDeposit?pill('Potwierdzone','success'):`<button type="button" class="j-btn ${ready?'':'disabled'}" data-j="${key==='deposit_received'?'payment':'lead-step'}" data-id="${E(l.id)}" data-step="${key}" ${ready?'':'disabled'}>${ready?'Potwierdź':'Zablokowane'}</button>`}</div>`).join('')}
+  function leadActions(l){
+    return stepDefs.map(([key,label,description],i)=>{
+      const confirmed=!!step(l,key)||(key==='deposit_received'&&hasPaidDeposit(l));
+      const ready=stepAllowed(l,key);
+      const hint=confirmed?(key==='deposit_received'?'Wpływ potwierdzony':String(step(l,key)).slice(0,10)):
+        (!ready?'Czeka na poprzedni krok':description);
+      const controls=confirmed?`<div class="j-step-actions">${pill('Potwierdzone','success')}${key!=='deposit_received'&&!hasPaidDeposit(l)?button('undo-lead-step','Cofnij',l.id+'|'+key,'subtle'):''}</div>`:
+        `<button type="button" class="j-btn ${ready?'':'disabled'}" data-j="${key==='deposit_received'?'payment':'lead-step'}" data-id="${E(l.id)}" data-step="${key}" ${ready?'':'disabled'}>${ready?'Potwierdź':'Zablokowane'}</button>`;
+      return `<div class="j-step ${confirmed?'complete':''} ${!ready&&!confirmed?'locked':''}" data-sales-step="${E(key)}"><span class="j-stepindex">${confirmed?'✓':String(i+1).padStart(2,'0')}</span><div><strong>${E(label)}</strong><small>${E(hint)}</small></div>${controls}</div>`;
+    }).join('');
+  }
+  function focusNextStep(){
+    if(typeof requestAnimationFrame!=='function')return;
+    requestAnimationFrame(()=>{
+      const next=document.querySelector('#jDetail .j-step:not(.complete):not(.locked)');
+      const drawer=document.querySelector('#jDetail .j-drawer');
+      if(next&&drawer){const rect=next.getBoundingClientRect(),parent=drawer.getBoundingClientRect();if(rect.bottom>parent.bottom||rect.top<parent.top+120)next.scrollIntoView({block:'center',behavior:'smooth'});}
+    });
+  }
   function showLead(id){const l=find('leads',id);if(!l||l.archivedAt)return;const current=leadStatus(l);const logs=active('leadActivities').filter(a=>String(a.leadId||'')===String(l.id)).sort((a,b)=>String(b.at||'').localeCompare(String(a.at||''))).slice(0,30);const p=active('projects').find(p=>String(p.leadId)===String(l.id));const docs=l.docs||{};detail(l.name,`<div class="j-detail-meta">${pill(current,current==='Klient'?'success':'')} ${pill(l.owner||'—')} ${pill(normalizeRegion(l.region))} ${pill(l.channel||'—')} ${l.country?pill(l.country):''}</div><div class="j-lead-progress"><div><small>Aktualny etap sprzedaży</small><strong>${E(current)}</strong></div><span>${Math.max(1,STAGES.indexOf(current)+1)} / ${STAGES.length}</span>${button('show-stage','Pokaż w pipeline',l.id,'primary')}</div>
-<div class="j-detail-toolbar">${href(l.contactUrl,'Rozmowa')}${href(l.prototypeUrl,'Prototyp')}${href(docs.contractUrl,'Umowa')}${href(docs.paymentUrl,'Link płatności')}${href(docs.briefUrl,'Brief')}${href(docs.assetsUrl,'Materiały')}</div><div class="j-detail-intro"><strong>Następny krok</strong><p>${E(l.nextAction||'Umów lub potwierdź kolejny etap')}</p><small>${E(l.next||'Brak terminu')}</small>${button('edit-lead','Edytuj dane i terminy',l.id)}</div><div class="j-drawer-section"><h3>01 / Proces sprzedaży</h3><p class="j-help">Każdy krok potwierdzasz dopiero po faktycznym wykonaniu. No-show nie oznacza, że call się odbył.</p>${leadActions(l)}${step(l,'call_booked')&&!step(l,'call_attended')?`<div class="j-inline-actions">${button('reschedule','Zmień termin calla',l.id)}${button('no-show','Nie pojawił się / no-show',l.id)}</div>`:''}</div><div class="j-drawer-section"><h3>02 / Brief i materiały</h3><p class="j-help">Można odebrać przed zaliczką lub po niej. Przyjmowanie plików odbywa się obecnie przez link zewnętrzny.</p><div class="j-two-inline"><div><strong>Brief</strong><p>${step(l,'brief_received')?'Otrzymany':'Oczekuje'}</p>${button('lead-brief','Zaktualizuj brief',l.id)}</div><div><strong>Materiały</strong><p>${step(l,'assets_received')?'Otrzymane':'Oczekują'}</p>${button('lead-assets','Zaktualizuj materiały',l.id)}</div></div></div><div class="j-drawer-section"><h3>03 / Rozliczenie</h3><p>Kwota umowy: ${l.amount?money(l.amount,l.currency):'Nieustalona'} · Zaliczka: ${l.depositAmount?money(l.depositAmount,l.currency):'Nieustalona'}</p>${leadPayments(l).map(p=>`<div class="j-line"><div><strong>${E(p.kind==='deposit'?'Zaliczka':p.kind==='balance'?'Druga transza':p.name||'Płatność')}</strong><small>${E(p.status)} · ${money(paid(p),p.currency)} / ${money(p.amount,p.currency)}</small></div></div>`).join('')||'<p class="j-help">Brak rozliczeń — dodaj kwoty w edycji i wyślij umowę.</p>'}${p?button('open-project','Przejdź do projektu →',p.id,'primary'):''}</div><div class="j-drawer-section"><h3>04 / Historia i notatki</h3>${button('lead-note','+ Dodaj notatkę',l.id)}${logs.map(a=>`<div class="j-history"><strong>${E(stepLabel[a.type]||a.type)}</strong><small>${E(String(a.at||'').slice(0,16).replace('T',' '))} · ${E(a.owner||'—')}</small>${a.note?`<p>${E(a.note)}</p>`:''}${a.type==='note'?`<div class="j-note-actions">${button('edit-note','Edytuj',a.id,'subtle')}${button('delete-note','Usuń',a.id,'danger')}</div>`:''}</div>`).join('')||'<p class="j-help">Brak zdarzeń.</p>'}</div><footer class="j-danger-footer">${button('delete-lead','Usuń klienta z aktywnych danych',l.id,'danger')}</footer>`);}
+<div class="j-detail-toolbar">${href(l.contactUrl,'Rozmowa')}${href(l.prototypeUrl,'Prototyp')}${href(docs.contractUrl,'Umowa')}${href(docs.paymentUrl,'Link płatności')}${href(docs.briefUrl,'Brief')}${href(docs.assetsUrl,'Materiały')}</div><div class="j-detail-intro"><strong>Następny krok</strong><p>${E(l.nextAction||'Umów lub potwierdź kolejny etap')}</p><small>${E(l.next||'Brak terminu')}</small>${button('edit-lead','Edytuj dane i terminy',l.id)}</div>${l.status&&l.status!==current&&!['Nowy','Wygrany','Finalizacja','Oferta','Discovery'].includes(l.status)?`<p class="j-legacy-warning">Zapisany wcześniej status: ${E(l.status)}. Brakuje potwierdzenia odpowiedniego kroku. Uzupełnij je poniżej — sam status nie jest dowodem, że call się odbył.</p>`:''}<div class="j-drawer-section"><h3>01 / Proces sprzedaży</h3><p class="j-help">Każdy krok potwierdzasz dopiero po faktycznym wykonaniu. No-show nie oznacza, że call się odbył.</p>${leadActions(l)}${step(l,'call_booked')&&!step(l,'call_attended')?`<div class="j-inline-actions">${button('reschedule','Zmień termin calla',l.id)}${button('no-show','Nie pojawił się / no-show',l.id)}</div>`:''}</div><div class="j-drawer-section"><h3>02 / Brief i materiały</h3><p class="j-help">Można odebrać przed zaliczką lub po niej. Przyjmowanie plików odbywa się obecnie przez link zewnętrzny.</p><div class="j-two-inline"><div><strong>Brief</strong><p>${step(l,'brief_received')?'Otrzymany':'Oczekuje'}</p>${button('lead-brief','Zaktualizuj brief',l.id)}</div><div><strong>Materiały</strong><p>${step(l,'assets_received')?'Otrzymane':'Oczekują'}</p>${button('lead-assets','Zaktualizuj materiały',l.id)}</div></div></div><div class="j-drawer-section"><h3>03 / Rozliczenie</h3><p>Kwota umowy: ${l.amount?money(l.amount,l.currency):'Nieustalona'} · Zaliczka: ${l.depositAmount?money(l.depositAmount,l.currency):'Nieustalona'}</p>${leadPayments(l).map(p=>`<div class="j-line"><div><strong>${E(p.kind==='deposit'?'Zaliczka':p.kind==='balance'?'Druga transza':p.name||'Płatność')}</strong><small>${E(p.status)} · ${money(paid(p),p.currency)} / ${money(p.amount,p.currency)}</small></div></div>`).join('')||'<p class="j-help">Brak rozliczeń — dodaj kwoty w edycji i wyślij umowę.</p>'}${p?button('open-project','Przejdź do projektu →',p.id,'primary'):''}</div><div class="j-drawer-section"><h3>04 / Historia i notatki</h3>${button('lead-note','+ Dodaj notatkę',l.id)}${logs.map(a=>`<div class="j-history"><strong>${E(stepLabel[a.type]||a.type)}</strong><small>${E(String(a.at||'').slice(0,16).replace('T',' '))} · ${E(a.owner||'—')}</small>${a.note?`<p>${E(a.note)}</p>`:''}${a.type==='note'?`<div class="j-note-actions">${button('edit-note','Edytuj',a.id,'subtle')}${button('delete-note','Usuń',a.id,'danger')}</div>`:''}</div>`).join('')||'<p class="j-help">Brak zdarzeń.</p>'}</div><footer class="j-danger-footer">${button('delete-lead','Usuń klienta z aktywnych danych',l.id,'danger')}</footer>`);}
   function editLead(id){if(!canWrite())return;const l=find('leads',id);if(!l)return;const d=l.docs||{};const call=l.callAt||'';openModal('Dane klienta / '+l.name,`<form class="j-form"><div class="j-form-grid"><label>Nazwa klienta<input name="name" required value="${E(l.name)}"></label><label>Opiekun<select name="owner">${options(['Kari','Adi'],l.owner)}</select></label><label>Region<select name="region">${options(regions,normalizeRegion(l.region))}</select></label><label>Kraj<input name="country" value="${E(l.country||'')}"></label><label>Kanał<select name="channel">${options(channels,l.channel||'WhatsApp')}</select></label><label>Waluta<select name="currency">${options(['PLN','EUR','USD','GBP','NOK','ZAR','CAD'],l.currency||'EUR')}</select></label><label>Wartość całej umowy<input name="amount" type="number" min="0" step="0.01" value="${E(l.amount||'')}"></label><label>Zaliczka ustalona w umowie<input name="depositAmount" type="number" min="0" step="0.01" value="${E(l.depositAmount||'')}"></label><label>Data follow-upu<input name="next" type="date" value="${E(l.next||'')}"></label><label>Termin calla<input name="callAt" type="datetime-local" value="${E(String(call).slice(0,16))}"></label><label>Link do rozmowy<input name="contactUrl" value="${E(l.contactUrl||'')}"></label><label>Prototyp URL<input name="prototypeUrl" value="${E(l.prototypeUrl||'')}"></label><label>Firma / nazwa do umowy<input name="clientLegalName" value="${E(d.clientLegalName||'')}"></label><label>Email do umowy<input name="clientEmail" type="email" value="${E(d.clientEmail||'')}"></label><label>Adres do umowy<input name="clientAddress" value="${E(d.clientAddress||'')}"></label><label>Numer podatkowy (jeśli dotyczy)<input name="clientTaxId" value="${E(d.clientTaxId||'')}"></label><label>Link do podpisanej umowy / dokumentu<input name="contractUrl" value="${E(d.contractUrl||'')}"></label><label>Link do zapłaty zaliczki<input name="paymentUrl" value="${E(d.paymentUrl||'')}"></label><label>Link do briefu<input name="briefUrl" value="${E(d.briefUrl||'')}"></label><label>Folder materiałów (Drive itp.)<input name="assetsUrl" value="${E(d.assetsUrl||'')}"></label></div><label>Co dokładnie zrobić dalej?<input name="nextAction" value="${E(l.nextAction||'')}"></label><label>Notatki<textarea name="note" rows="4">${E(l.note||'')}</textarea></label><footer>${button('close-modal','Anuluj')}<button type="submit" class="j-btn primary">Zapisz zmiany</button></footer></form>`,data=>{const name=String(data.get('name')||'').trim();if(!name)return;const total=Number(data.get('amount')||0),deposit=Number(data.get('depositAmount')||0);if(total<0||deposit<0||(total&&deposit>total)){notify('Zaliczka nie może przekraczać wartości umowy');return}Object.assign(l,{name,owner:data.get('owner'),region:data.get('region'),country:String(data.get('country')||''),channel:data.get('channel'),currency:data.get('currency'),amount:total,depositAmount:deposit,next:String(data.get('next')||''),callAt:String(data.get('callAt')||''),contactUrl:url(data.get('contactUrl')),prototypeUrl:url(data.get('prototypeUrl')),nextAction:String(data.get('nextAction')||''),note:String(data.get('note')||''),editedAt:stamp()});l.docs={...d,clientLegalName:String(data.get('clientLegalName')||''),clientEmail:String(data.get('clientEmail')||''),clientAddress:String(data.get('clientAddress')||''),clientTaxId:String(data.get('clientTaxId')||''),contractUrl:url(data.get('contractUrl')),paymentUrl:url(data.get('paymentUrl')),briefUrl:url(data.get('briefUrl')),assetsUrl:url(data.get('assetsUrl'))};closeModal();swSave('sales','Zmieniono dane klienta: '+l.name);showLead(id)})}
   function stepAllowed(l,key){const a=l.journey||{};switch(key){case 'call_booked':return true;case 'call_attended':return !!a.call_booked&&!!l.callAt;case 'prototype_shown':return !!a.call_attended;case 'welcome_sent':return !!a.prototype_shown;case 'client_details':return !!a.welcome_sent;case 'contract_sent':return !!a.client_details;case 'contract_signed':return !!a.contract_sent;case 'brief_received':case 'assets_received':return !!a.welcome_sent;case 'deposit_received':return !!a.contract_signed;default:return false}}
   function markLead(l,key,extra={}){if(!canWrite()||!stepAllowed(l,key)){notify('Najpierw potwierdź poprzedni etap');return false}if(key==='client_details'&&(!l.docs?.clientLegalName||!l.docs?.clientEmail)){notify('Uzupełnij dane do umowy');return false}if(key==='contract_sent'&&!l.docs?.paymentUrl){notify('Uzupełnij link płatności');return false}if(step(l,key)){notify('Ten krok jest już potwierdzony');return false}l.journey??={};l.journey[key]=stamp();if(key==='call_booked')l.status='Call umówiony';if(key==='call_attended')l.status='Call odbyty';if(key==='welcome_sent')l.status='Onboarding wysłany';if(key==='contract_sent')l.status='Umowa + płatność';l.nextAction=({call_booked:'Potwierdź obecność na callu',call_attended:'Pokaż prototyp i przeprowadź sprzedaż',prototype_shown:'Wyślij dokumenty welcome i onboarding',welcome_sent:'Poczekaj na dane klienta do umowy',client_details:'Przygotuj i wyślij umowę z linkiem płatności',contract_sent:'Uzyskaj podpis i zaliczkę',contract_signed:'Oczekuj zaksięgowania zaliczki'})[key]||l.nextAction;
     if(key==='contract_sent'&&Number(l.depositAmount)>0&&!leadPayments(l,'deposit').length){arr('payments').push({id:uid(),name:`Zaliczka / ${l.name}`,leadId:l.id,kind:'deposit',amount:Number(l.depositAmount),currency:l.currency||'EUR',status:'Oczekiwana',receivedAmount:0,owner:l.owner,createdAt:stamp()})}
-    recordEvent(l,key,extra);reward(l,key);swSave('sales',`${stepLabel[key]||key} — ${l.name}`);showLead(l.id);return true;}
+    const previouslyRecorded=arr('leadActivities').some(a=>String(a.leadId)===String(l.id)&&a.type===key);
+    recordEvent(l,key,extra);if(!previouslyRecorded)reward(l,key);
+    swSave('sales',`${stepLabel[key]||key} — ${l.name}`);showLead(l.id);focusNextStep();return true;}
   function reward(l,key){const reward={call_booked:15,call_attended:50,prototype_shown:15,welcome_sent:30,client_details:15,contract_signed:70,deposit_received:150};const pts=reward[key]||0;if(!pts)return;db.xp??={Kari:0,Adi:0};const owner=user||l.owner||'Kari';db.xp[owner]=Number(db.xp[owner]||0)+pts}
-  function markPrompt(id,key){const l=find('leads',id);if(!l)return;if(key==='deposit_received'){paymentModal(id,'deposit');return}if(!stepAllowed(l,key)){notify('Ten krok nie jest jeszcze dostępny');return}if(key==='call_booked'){openModal('Umów discovery / '+l.name,`<form class="j-form"><p class="j-help">To nie jest integracja z kalendarzem. Zapisz potwierdzony termin spotkania.</p><label>Data i godzina calla *<input name="callAt" type="datetime-local" required value="${E(l.callAt||'')}"></label><footer><button class="j-btn primary" type="submit">Potwierdź termin</button></footer></form>`,d=>{l.callAt=String(d.get('callAt'));l.next=l.callAt.slice(0,10);closeModal();markLead(l,key,{callAt:l.callAt})});return}if(key==='contract_sent'&&!l.docs?.paymentUrl){notify('Najpierw uzupełnij link płatności w danych klienta');editLead(id);return}if(key==='client_details'&&(!l.docs?.clientLegalName||!l.docs?.clientEmail)){notify('Uzupełnij nazwę firmy i email do umowy');editLead(id);return}if(!confirm(`Potwierdzasz rzeczywiste wykonanie: ${stepLabel[key]}?`))return;markLead(l,key)}
+  function markPrompt(id,key){const l=find('leads',id);if(!l)return;if(key==='deposit_received'){paymentModal(id,'deposit');return}if(!stepAllowed(l,key)){notify('Ten krok nie jest jeszcze dostępny');return}if(key==='call_booked'){
+      openModal('Umów discovery / '+l.name,`<form class="j-form"><p class="j-help">Zapis terminu i potwierdzenie etapu to jedna operacja. Użyj faktycznie uzgodnionej godziny spotkania.</p><label>Data i godzina calla *<input name="callAt" type="datetime-local" required value="${E(String(l.callAt||'').slice(0,16))}"></label><footer><button class="j-btn primary" type="submit">Zapisz termin i potwierdź etap</button></footer></form>`,d=>{
+        const at=String(d.get('callAt')||'').trim();
+        if(!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(at)||Number.isNaN(new Date(at).getTime())){notify('Wybierz prawidłową datę i godzinę calla');return}
+        const oldAt=l.callAt,oldNext=l.next;
+        l.callAt=at;l.next=at.slice(0,10);
+        if(markLead(l,key,{callAt:at})){closeModal();focusNextStep()}
+        else{l.callAt=oldAt;l.next=oldNext}
+      });return
+    }if(key==='contract_sent' &&!l.docs?.paymentUrl){notify('Najpierw uzupełnij link płatności w danych klienta');editLead(id);return}if(key==='client_details'&&(!l.docs?.clientLegalName||!l.docs?.clientEmail)){notify('Uzupełnij nazwę firmy i email do umowy');editLead(id);return}if(!confirm(`Potwierdzasz rzeczywiste wykonanie: ${stepLabel[key]}?`))return;markLead(l,key)}
   function showStage(id){
     $('jDetail')?.remove();
     if(view!=='sales')navigate('sales');else renderSales();
@@ -145,7 +175,11 @@
   function requestLeadStage(id,to){
     const l=find('leads',id);if(!l||!STAGES.includes(to)||!canWrite())return false;
     const from=leadStatus(l);
-    if(from===to)return true;
+    if(from===to){
+      const milestone={'Call umówiony':'call_booked','Call odbyty':'call_attended','Onboarding wysłany':'welcome_sent','Umowa + płatność':'contract_sent'}[to];
+      if(milestone&&!step(l,milestone)){markPrompt(id,milestone)}
+      return true;
+    }
     const fromIndex=STAGES.indexOf(from),toIndex=STAGES.indexOf(to);
     if(from==='Klient'){notify('Opłacony klient jest już w Projektach. Nie cofaj zaliczki przez pipeline.');renderSales();return false}
     if(to==='Klient'){
@@ -167,7 +201,9 @@
         const idx=cutoff[to]??-1;
         stepDefs.forEach(([key],i)=>{if(i>idx)delete l.journey?.[key]});
         if(to==='Zainteresowany'){delete l.callAt;l.nextAction='Umów discovery call'}
-        l.status=to;delete l.closedAt;delete l.closedReason;l.editedAt=stamp();
+        l.status='Zainteresowany';delete l.closedAt;delete l.closedReason;l.editedAt=stamp();
+        l.status=leadStatus(l);
+        if(l.status!==to){notify('Przywrócono ostatni faktycznie potwierdzony etap: '+l.status)}
         recordEvent(l,'stage_corrected',{note:`${from} → ${to}. Powód: ${reason}`});
         closeModal();swSave('sales','Korekta etapu '+l.name+': '+from+' → '+to);showStage(id);
       });return true;
@@ -180,12 +216,34 @@
         swSave('sales','Uzgodniono etap klienta '+l.name);showStage(id);return true;
       }
       if(!stepAllowed(l,key)){
-        notify(to==='Onboarding wysłany'?'Najpierw potwierdź prezentację prototypu po callu.':'Najpierw potwierdź poprzednie kroki w karcie klienta.');
+        const limit=stepDefs.findIndex(x=>x[0]===key);
+        const missing=stepDefs.slice(0,limit+1).find(([k])=>!step(l,k));
+        notify('Do etapu „'+to+'” brakuje potwierdzenia: '+(stepLabel[missing?.[0]]||stepLabel[key]));
+        if(missing){markPrompt(id,missing[0]);return true}
         showLead(id);return false;
       }
       markPrompt(id,key);return true;
     }
     notify('Wybierz najbliższy rzeczywisty krok z karty klienta.');showLead(id);return false;
+  }
+  function undoLeadStep(id,key){
+    const l=find('leads',id);
+    const index=stepDefs.findIndex(x=>x[0]===key);
+    if(!l||index<0||!step(l,key)||!canWrite())return;
+    if(hasPaidDeposit(l)||leadPayments(l,'deposit').some(p=>paid(p)>0)){
+      notify('Nie można cofać etapów po wpłacie. Najpierw skoryguj rozliczenia.');return;
+    }
+    const affected=stepDefs.slice(index).filter(([k])=>!!step(l,k)).map(([k])=>k);
+    openModal('Korekta procesu / '+l.name,`<form class="j-form"><p class="j-help">Wycofasz potwierdzenie „${E(stepLabel[key])}”${affected.length>1?' i '+(affected.length-1)+' późniejszych kroków':''}. Historia pozostanie dostępna.</p><label>Powód korekty *<textarea name="reason" required rows="3" maxlength="1200" placeholder="np. Termin wpisany omyłkowo"></textarea></label><footer>${button('close-modal','Anuluj')}<button class="j-btn danger" type="submit">Cofnij potwierdzenie</button></footer></form>`,d=>{
+      const reason=String(d.get('reason')||'').trim();if(!reason)return;
+      affected.forEach(k=>delete l.journey[k]);
+      if(index===0){l.callAt='';l.next=''}
+      if(index<=5){for(const p of leadPayments(l,'deposit')){if(paid(p)===0){p.archivedAt=stamp();p.archivedBy=user}}}
+      l.status='Zainteresowany';l.status=leadStatus(l);
+      l.nextAction=stepDefs.find(([k])=>!step(l,k))?.[2]||'Wykonaj następny krok';
+      recordEvent(l,'milestone_corrected',{note:`Cofnięto ${affected.map(k=>stepLabel[k]).join(', ')}. Powód: ${reason}`});
+      closeModal();swSave('sales','Korekta procesu: '+l.name);showLead(id);
+    });
   }
   function reschedule(id){const l=find('leads',id);if(!l||!canWrite()||!step(l,'call_booked'))return;openModal('Nowy termin calla',`<form class="j-form"><label>Termin spotkania<input name="callAt" type="datetime-local" required value="${E(l.callAt||'')}"></label><footer><button type="submit" class="j-btn primary">Potwierdź nowy termin</button></footer></form>`,d=>{l.callAt=String(d.get('callAt'));l.next=l.callAt.slice(0,10);l.nextAction='Potwierdź obecność na callu';recordEvent(l,'call_rescheduled',{callAt:l.callAt});closeModal();swSave('sales','Przesunięto call '+l.name);showLead(id)})}
   function noShow(id){const l=find('leads',id);if(!l||!canWrite()||!step(l,'call_booked')||step(l,'call_attended'))return;if(!confirm('Klient faktycznie nie pojawił się na umówionym callu?'))return;l.noShowCount=Number(l.noShowCount||0)+1;l.next='';l.callAt='';l.nextAction='Ponownie umów call po no-show';recordEvent(l,'call_no_show');swSave('sales','No-show: '+l.name);showLead(id)}
@@ -258,7 +316,7 @@
     const cash=sums(received),expense=sums(costs),net={};for(const c of new Set([...Object.keys(cash),...Object.keys(expense)]))net[c]=(cash[c]||0)-(expense[c]||0);
     const byRegion=Object.fromEntries(regions.map(x=>[x,{outreach:0,interested:0,deposit:0}]));
     const byChannel=Object.fromEntries(channels.map(x=>[x,{outreach:0,interested:0}]));
-    for(const b of batches){const r=normalizeRegion(b.region),c=b.channel;if(byRegion[r])byRegion[r].outreach+=Math.max(0,Number(b.count||0));if(byChannel[c])byChannel[c].outreach+=Math.max(0,Number(b.count||0))}
+    for(const b of batches){const segments=window.SWGrowth?.segmentsOf(b)||[b];for(const seg of segments){const r=normalizeRegion(seg.region),c=seg.channel,n=Math.max(0,Number(seg.count||0));if(byRegion[r])byRegion[r].outreach+=n;if(byChannel[c])byChannel[c].outreach+=n}}
     for(const l of newLeads){const r=normalizeRegion(l.region),c=l.channel;if(byRegion[r])byRegion[r].interested++;if(byChannel[c])byChannel[c].interested++}
     for(const l of leads){const p=(data.payments||[]).filter(p=>!p.archivedAt&&String(p.leadId)===String(l.id)&&p.kind==='deposit'&&paid(p)>0&&inRange(p.paidAt||p.date,r));if(p.length&&byRegion[normalizeRegion(l.region)])byRegion[normalizeRegion(l.region)].deposit++}
     const cohort={interested:newLeads.length,booked:newLeads.filter(l=>!!step(l,'call_booked')).length,attended:newLeads.filter(l=>!!step(l,'call_attended')).length,welcome:newLeads.filter(l=>!!step(l,'welcome_sent')).length,signed:newLeads.filter(l=>!!step(l,'contract_signed')).length,deposit:newLeads.filter(l=>hasPaidDeposit(l)).length};
@@ -288,7 +346,7 @@
   window.swLiteQuickAdd=newLead;
   window.SWLite.stageOf=leadStatus;
   window.SWLite.qualified=qualified;
-  window.SW_RELEASE='12.0.0-workflow-fix';
+  window.SW_RELEASE='13.0.0-outreach-insights';
   let dragged=null,draggedLead=null;
   document.addEventListener('dragstart',e=>{const card=e.target.closest?.('.j-leadcard[data-j-lead]');if(!card)return;draggedLead=card.dataset.jLead;card.classList.add('is-dragging');if(e.dataTransfer){e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('text/plain',draggedLead)}});
   document.addEventListener('dragover',e=>{const col=e.target.closest?.('.j-pipeline-col[data-j-stage]');if(!col||!draggedLead)return;e.preventDefault();col.classList.add('is-over');if(e.dataTransfer)e.dataTransfer.dropEffect='move'});
@@ -308,6 +366,7 @@
     case 'projects':selectedProject=null;navigate('forge');break;case 'new-lead':newLead();break;case 'lead':showLead(id);break;
     case 'edit-lead':$('jDetail')?.remove();editLead(id);break;case 'show-stage':showStage(id);break;case 'edit-note':editNote(id);break;case 'delete-note':deleteNote(id);break;
     case 'lead-step':markPrompt(id,el.dataset.step);break;
+    case 'undo-lead-step':{const [leadId,key]=id.split('|');undoLeadStep(leadId,key);break}
     case 'lead-brief':briefOrAssets(id,'brief_received');break;case 'lead-assets':briefOrAssets(id,'assets_received');break;
     case 'payment':paymentModal(id,'deposit');break;case 'balance-payment':paymentModal(id,'balance');break;
     case 'lead-note':addNote(id);break;case 'reschedule':reschedule(id);break;case 'no-show':noShow(id);break;
@@ -323,5 +382,5 @@
     case 'money-period':moneyPeriod=el.dataset.period;renderMoney();break;
   }});
   // Region aliases are DISPLAY-ONLY for old records; the originals remain intact for audit.
-  window.SWJourney={regions,normalizeRegion,STAGES,stepDefs,milestoneDefs,leadStatus,qualified,stepAllowed,markLead,recordPayment,ensureProject,moneyStats,projectStatus,projectProgress,range,renderMoney,renderTasks,renderProjects,renderProject,openLead:showLead,openTask:showTask,newLead,requestLeadStage,editNote,deleteNote,restore,archive,taskStages};
+  window.SWJourney={regions,normalizeRegion,STAGES,stepDefs,milestoneDefs,leadStatus,qualified,stepAllowed,markLead,recordPayment,ensureProject,moneyStats,projectStatus,projectProgress,range,renderMoney,renderTasks,renderProjects,renderProject,openLead:showLead,openTask:showTask,newLead,requestLeadStage,undoLeadStep,editNote,deleteNote,restore,archive,taskStages};
 })();
