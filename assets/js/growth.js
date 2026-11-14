@@ -12,12 +12,64 @@
   const regions = ['Europa', 'Asia', 'North America', 'Africa'];
   const normalizeRegion = value => ({'APAC':'Asia','Azja':'Asia','Afryka':'Africa','Ameryka Północna':'North America','Europe':'Europa','Bliski Wschód':'Asia'})[value] || value || 'Europa';
   const channels = ['WhatsApp', 'Instagram', 'Email', 'LinkedIn', 'Inne'];
+  const variants = ['A', 'B', 'Bez oznaczenia'];
+  const dayTarget = 50;
   const regionFromMarket = market => ({PL:'Europa',NO:'Europa',FR:'Europa',DE:'Europa',UK:'Europa',USCA:'North America',AF:'Africa',APAC:'Asia'})[market] || '';
   const activeBatches = data => (data.leadActivities || []).filter(a => a.type === 'outreach_batch' && !a.archivedAt);
   const allBatches = data => (data.leadActivities || []).filter(a => a.type === 'outreach_batch');
   const batchDate = a => a.occurredOn || String(a.at || '').slice(0,10);
   const validDate = v => /^\d{4}-\d{2}-\d{2}$/.test(v) && !Number.isNaN(new Date(v + 'T12:00:00Z').getTime()) && new Date(v + 'T12:00:00Z').toISOString().slice(0,10) === v;
   const validCount = v => Number.isSafeInteger(Number(v)) && Number(v) > 0 && Number(v) <= 10000;
+  const integer = n => Number.isSafeInteger(Number(n)) && Number(n) >= 0;
+  const validClock = t => /^([01]\d|2[0-3]):[0-5]\d$/.test(String(t));
+  const clock = d => `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+  const tz = () => {try{return Intl.DateTimeFormat().resolvedOptions().timeZone || 'Europe/Warsaw'}catch{return 'Europe/Warsaw'}};
+  // v10-v12.1 records are single-region, with no verified view data.
+  // Missing view fields must NOT be interpreted as "not viewed".
+  function segmentsOf(batch) {
+    const raw = Array.isArray(batch.segments) && batch.segments.length ? batch.segments : [{
+      region:batch.region, country:batch.country, channel:batch.channel, variant:batch.variant,
+      count:batch.count, viewed:batch.viewed, notViewed:batch.notViewed
+    }];
+    return raw.map(x => {
+      const count=Math.max(0,Number(x.count)||0);
+      const viewed=Math.min(count,Math.max(0,Number(x.viewed)||0));
+      const notViewed=Math.min(count-viewed,Math.max(0,Number(x.notViewed)||0));
+      return {region:normalizeRegion(x.region),country:String(x.country||''),channel:String(x.channel||'Inne'),
+        variant:variants.includes(x.variant)?x.variant:'Bez oznaczenia',count,viewed,notViewed,
+        unknown:count-viewed-notViewed};
+    });
+  }
+  function normalizedInput(input, date=new Date()) {
+    const occurredOn=String(input.occurredOn||today(date));
+    const startedAt=String(input.startedAt||'').trim(),endedAt=String(input.endedAt||'').trim();
+    if(!validDate(occurredOn)||occurredOn>today(date)|| (startedAt&&!validClock(startedAt)) || (endedAt&&!validClock(endedAt)) || (endedAt&&!startedAt)){
+      notify('Sprawdź datę i godziny. Czas zakończenia wymaga godziny rozpoczęcia.');return null;
+    }
+    const raw=Array.isArray(input.segments)&&input.segments.length?input.segments:[input];
+    if(raw.length>100){notify('Jedna sesja może zawierać maksymalnie 100 grup.');return null}
+    const segments=[];
+    for(const r of raw){
+      const count=Number(r.count),viewed=Number(r.viewed??0),notViewed=Number(r.notViewed??0);
+      const region=normalizeRegion(r.region),channel=String(r.channel||''),variant=String(r.variant||'Bez oznaczenia');
+      if(!validCount(count)||!integer(viewed)||!integer(notViewed)||viewed+notViewed>count||
+        !regions.includes(region)||!channels.includes(channel)||!variants.includes(variant)){
+          notify('Sprawdź podziały: liczby muszą być całkowite, a wyświetlone + niewyświetlone nie mogą przekroczyć wysłanych.');return null;
+      }
+      segments.push({region,country:String(r.country||'').trim().slice(0,100),channel,variant,count,viewed,notViewed});
+    }
+    const count=segments.reduce((n,r)=>n+r.count,0);
+    if(!validCount(count)){notify('W jednej sesji możesz zapisać od 1 do 10 000 wiadomości.');return null}
+    const same=k=>segments.every(r=>r[k]===segments[0][k])?segments[0][k]:'';
+    const timeZone=String(input.timeZone||tz()).trim().slice(0,100);
+    if(timeZone && !/^[A-Za-z0-9_+\/-]{1,100}$/.test(timeZone)){notify('Nieprawidłowa strefa czasowa.');return null}
+    return {count,segments,occurredOn,startedAt,endedAt,timeZone,
+      region:same('region')||'Wiele regionów',channel:same('channel')||'Wiele kanałów',
+      country:same('country'),variant:same('variant')||'Mix A/B',
+      campaign:String(input.campaign||'').trim().slice(0,120),notes:String(input.notes||'').trim().slice(0,500),
+      at:`${occurredOn}T${startedAt||'12:00'}:00`};
+  }
+
   function dates(period, date = new Date()) {
     if (period === 'all') return {start:'0000-01-01', end:'9999-12-31', label:'Cała historia'};
     const d = new Date(date.getFullYear(), date.getMonth(), date.getDate());
@@ -46,14 +98,25 @@
     const byRegion = Object.fromEntries(regions.map(r => [r,0]));
     const byChannel = Object.fromEntries(channels.map(c => [c,0]));
     const byOperator = {Kari:0, Adi:0};
-    let outreach = 0;
-    for (const a of batches) {
-      const n = Number(a.count || 0);
-      if (!Number.isFinite(n) || n < 1) continue;
-      outreach += n;
-      const regionKey = normalizeRegion(a.region); byRegion[regionKey] = (byRegion[regionKey] || 0) + n;
-      byChannel[a.channel] = (byChannel[a.channel] || 0) + n;
-      byOperator[a.owner] = (byOperator[a.owner] || 0) + n;
+    let outreach=0,viewed=0,notViewed=0,unknown=0;
+    const byVariant=Object.fromEntries(variants.map(v=>[v,{count:0,viewed:0,notViewed:0,unknown:0}]));
+    const byHour={}; const byDay={};
+    for(const a of batches){
+      for(const seg of segmentsOf(a)){
+        if(!seg.count)continue;
+        outreach+=seg.count;viewed+=seg.viewed;notViewed+=seg.notViewed;unknown+=seg.unknown;
+        byRegion[seg.region]=(byRegion[seg.region]||0)+seg.count;
+        byChannel[seg.channel]=(byChannel[seg.channel]||0)+seg.count;
+        byOperator[a.owner]=(byOperator[a.owner]||0)+seg.count;
+        const v=byVariant[seg.variant] || (byVariant[seg.variant]={count:0,viewed:0,notViewed:0,unknown:0});
+        for(const k of ['count','viewed','notViewed','unknown'])v[k]+=seg[k];
+        const day=batchDate(a);byDay[day]=(byDay[day]||0)+seg.count;
+        if(validClock(a.startedAt)){
+          const hour=a.startedAt.slice(0,2),key=`${hour}:00`;
+          const h=byHour[key]||(byHour[key]={count:0,viewed:0,notViewed:0,unknown:0});
+          for(const k of ['count','viewed','notViewed','unknown'])h[k]+=seg[k];
+        }
+      }
     }
     const leads = (data.leads || []).filter(l => !l.archivedAt && window.SWLite?.qualified(l));
     const newLeads = leads.filter(l => inside(l.interestedAt || l.createdAt,range));
@@ -82,7 +145,7 @@
     const pendingFollowups = open.filter(l => (l.next || l.nextDate || '') && (l.next || l.nextDate || '') <= today(date));
     const noNext = open.filter(l => !l.next && !l.nextDate);
     const proposalsAtRisk = open.filter(l => ['Oferta','Finalizacja'].includes(window.SWLite.stageOf(l)) && (!(l.next || l.nextDate) || (l.next || l.nextDate) <= today(date)));
-    return {range,batches,outreach,byRegion,byChannel,byOperator,newLeads,leads,won,finished,calls,proposals,received,receivedAll,expenses,pending,pipeline,wonValues,open,pendingFollowups,noNext,proposalsAtRisk};
+    return {range,batches,outreach,viewed,notViewed,unknown,byVariant,byHour,byDay,byRegion,byChannel,byOperator,newLeads,leads,won,finished,calls,proposals,received,receivedAll,expenses,pending,pipeline,wonValues,open,pendingFollowups,noNext,proposalsAtRisk};
   }
   let periodFilter = 'week';
   const canWrite = () => {if (cloudConfigured && !cloudActive) {notify('Zaloguj się do Supabase przed zapisem');return false}return true};
@@ -91,32 +154,25 @@
     return allBatches(db).filter(a => a.owner === owner && a.createdAt?.slice(0,10) === day)
       .reduce((sum,a) => sum + Number(a.xpAwarded || 0),0);
   }
-  function createBatch(input, date = new Date()) {
-    if (!canWrite()) return false;
-    const count = Number(input.count), occurredOn = String(input.occurredOn || today(date));
-    const region = String(input.region || ''), channel = String(input.channel || '');
-    if (!validCount(count)) {notify('Podaj liczbę od 1 do 10 000');return false}
-    if (!regions.includes(region) || !channels.includes(channel) || !validDate(occurredOn) || occurredOn > today(date)) {notify('Sprawdź region, kanał i datę');return false}
-    const owner = user || 'Kari';
-    const day = today(date);
-    const xpAwarded = occurredOn === day ? Math.max(0,Math.min(count, 100 - alreadyEarned(owner,day))) : 0;
-    const batch = {id:uid(),type:'outreach_batch',count,region,channel,
-      country:String(input.country || '').trim().slice(0,100),occurredOn,
-      at:occurredOn+'T12:00:00',createdAt:now(),owner,xpAwarded};
-    db.leadActivities ??= []; db.xp ??= {Kari:0,Adi:0};
-    db.leadActivities.push(batch);db.xp[owner] = Number(db.xp[owner] || 0) + xpAwarded;
-    saveGrowth(`Zalogowano ${count} outreach / ${region} / ${channel}`);
-    notify(`Outreach +${num(count)}${xpAwarded ? ` · +${xpAwarded} XP` : ''}`);
+  function createBatch(input,date=new Date()) {
+    if(!canWrite())return false;
+    const payload=normalizedInput(input,date);if(!payload)return false;
+    const owner=user||'Kari',day=today(date);
+    const xpAwarded=payload.occurredOn===day?Math.max(0,Math.min(payload.count,100-alreadyEarned(owner,day))):0;
+    const batch={id:uid(),type:'outreach_batch',...payload,createdAt:now(),owner,xpAwarded};
+    db.leadActivities??=[];db.xp??={Kari:0,Adi:0};
+    db.leadActivities.push(batch);db.xp[owner]=Number(db.xp[owner]||0)+xpAwarded;
+    saveGrowth(`Zalogowano ${payload.count} outreach / ${payload.segments.length} grup / ${payload.channel}`);
+    notify(`Outreach +${num(payload.count)}${xpAwarded?` · +${xpAwarded} XP`:''}`);
     return batch;
   }
   function updateBatch(batchId,input) {
-    if (!canWrite()) return false;
-    const b = allBatches(db).find(a => String(a.id) === String(batchId)); if (!b || b.archivedAt) return false;
-    const count = Number(input.count), occurredOn = String(input.occurredOn || '');
-    const region = String(input.region || ''),channel = String(input.channel || '');
-    if (!validCount(count) || !regions.includes(region) || !channels.includes(channel) || !validDate(occurredOn) || occurredOn > today()) {notify('Sprawdź dane sesji');return false}
-    Object.assign(b,{count,region,channel,country:String(input.country||'').trim().slice(0,100),occurredOn,at:occurredOn+'T12:00:00',editedAt:now(),editedBy:user});
-    saveGrowth('Poprawiono sesję outreach'); notify('Zmieniono wpis; XP pozostaje bez zmian');return true;
+    if(!canWrite())return false;
+    const b=allBatches(db).find(a=>String(a.id)===String(batchId));if(!b||b.archivedAt)return false;
+    // Legacy edit API also accepts the old single-region shape.
+    const payload=normalizedInput(input);if(!payload)return false;
+    Object.assign(b,payload,{editedAt:now(),editedBy:user});
+    saveGrowth('Poprawiono sesję outreach');notify('Zapisano korektę. XP bez zmian.');return true;
   }
   function archiveBatch(id) {
     if (!canWrite())return false;
@@ -127,34 +183,111 @@
   }
   function action(action,label,id='') {return `<button type="button" class="lite-action" data-growth="${safe(action)}" data-id="${safe(id)}">${safe(label)}</button>`}
   const opt = (items,value) => items.map(x => `<option value="${safe(x)}" ${x===value?'selected':''}>${safe(x)}</option>`).join('');
-  function form(batch=null) {
+  const segmentHtml=(seg={},index=0)=>`<div class="growth-segment" data-growth-segment>
+    <div class="growth-segment-heading"><span>GRUPA <b data-segment-number>${index+1}</b></span><button type="button" class="lite-action" data-growth-row="remove">Usuń grupę</button></div>
+    <div class="growth-segment-fields"><label>Wysłane<input name="segmentCount" aria-label="Liczba wysłanych" type="number" min="1" max="10000" step="1" required value="${seg.count??''}" placeholder="np. 3"></label>
+    <label>Region<select name="segmentRegion">${opt(regions,normalizeRegion(seg.region)||'Europa')}</select></label>
+    <label>Kraj · opcjonalnie<input name="segmentCountry" maxlength="100" value="${safe(seg.country||'')}" placeholder="np. USA"></label>
+    <label>Kanał<select name="segmentChannel">${opt(channels,seg.channel||'WhatsApp')}</select></label>
+    <label>Wiadomość<select name="segmentVariant">${opt(variants,seg.variant||'A')}</select></label>
+    <label>Wyświetlone<input name="segmentViewed" type="number" min="0" step="1" required value="${seg.viewed??0}"></label>
+    <label>Niewyświetlone · potwierdzone<input name="segmentNotViewed" type="number" min="0" step="1" required value="${seg.notViewed??0}"></label></div>
+    <small class="growth-segment-status" data-growth-segment-status>Reszta to status nieznany — nie liczymy jej jako niewyświetlonych.</small>
+  </div>`;
+  function updateFormTotals(){
+    const wrap=$('liteDialog');if(!wrap)return;
+    let count=0,viewed=0,notViewed=0;
+    const rows=[...wrap.querySelectorAll('[data-growth-segment]')];
+    rows.forEach((row,i)=>{
+      row.querySelector('[data-segment-number]').textContent=String(i+1);
+      const n=Number(row.querySelector('[name="segmentCount"]').value||0);
+      const v=Number(row.querySelector('[name="segmentViewed"]').value||0);
+      const u=Number(row.querySelector('[name="segmentNotViewed"]').value||0);
+      count+=n;viewed+=v;notViewed+=u;
+      const good=Number.isInteger(n)&&n>0&&Number.isInteger(v)&&v>=0&&Number.isInteger(u)&&u>=0&&v+u<=n;
+      row.classList.toggle('growth-invalid',!good);
+      row.querySelector('[data-growth-segment-status]').textContent=good?`${n-v-u} ze statusem nieznanym`:'Sprawdź liczbę wiadomości i wyniki';
+      row.querySelector('[data-growth-row="remove"]').disabled=rows.length===1;
+    });
+    const total=$('growthFormTotals');if(total){const unknown=count-viewed-notViewed;total.innerHTML=`<strong>${num(count)}</strong> wysłanych <span>· ${num(viewed)} wyświetlonych · ${num(notViewed)} niewyświetlonych · ${num(Math.max(0,unknown))} nieznanych</span>`;}
+  }
+  function form(batch=null,focusResults=false){
     if(!canWrite())return;
-    const editing = !!batch;
-    window.SWLite.openDialog(editing?'Popraw sesję outreach':'Zapisz wykonany outreach',`<p class="lite-modal-intro">Jeden wpis = liczba rzeczywiście wysłanych pierwszych wiadomości. Bez listy firm i bez tworzenia leadów.</p>
-      <form class="fields">
-        <label>Ile wiadomości wysłaliście?<input type="number" min="1" max="10000" step="1" name="count" required value="${editing?safe(batch.count):''}" placeholder="np. 40"></label>
-        <label>Region<select name="region">${opt(regions,normalizeRegion(batch?.region)||'Europa')}</select></label>
-        <label>Kanał<select name="channel">${opt(channels,batch?.channel||'WhatsApp')}</select></label>
-        <label>Data wysyłki<input type="date" name="occurredOn" required max="${today()}" value="${safe(batch?.occurredOn||today())}"></label>
-        <details class="lite-advanced"><summary>Doprecyzuj kraj (opcjonalnie)</summary><label>Kraj<input maxlength="100" name="country" placeholder="np. Norwegia" value="${safe(batch?.country||'')}"></label></details>
-        <div class="lite-form-footer"><span>${editing?'Poprawka nie przyznaje nowego XP.':`Operator: <strong>${safe(user||'—')}</strong> · max 100 XP/dzień za outreach`}</span><button class="btn" type="submit">${editing?'Zapisz korektę':'Zapisz outreach'}</button></div>
-      </form>`,data=>{const value=Object.fromEntries(data.entries());const result=editing?updateBatch(batch.id,value):createBatch(value);if(result)window.SWLite.closeDialog()});
+    const editing=!!batch;
+    const segments=editing?segmentsOf(batch):[{region:'Europa',channel:'WhatsApp',variant:'A',count:'',viewed:0,notViewed:0}];
+    window.SWLite.openDialog(editing?'Edytuj sesję outreach':'Zapisz sesję outreach',`<p class="lite-modal-intro">Podziel jedną sesję na grupy według regionu, kanału i wersji wiadomości. Statusy wyświetlenia aktualizujesz ręcznie — nie mamy automatycznego dostępu do potwierdzeń WhatsApp/Instagram.</p>
+      <form class="fields" id="growthForm"><div class="growth-form-top"><label>Data wysyłki<input type="date" name="occurredOn" required max="${today()}" value="${safe(batch?.occurredOn||today())}"></label>
+      <label>Od godziny<input type="time" name="startedAt" value="${safe(batch?.startedAt||(editing?'':clock(new Date())))}"></label>
+      <label>Do godziny · opcjonalnie<input type="time" name="endedAt" value="${safe(batch?.endedAt||'')}"></label></div>
+      <div class="growth-partition-head"><div><strong>Podział wiadomości</strong><small>Przykład: 3 North America + 2 Asia + 5 Europa</small></div><button class="lite-action" data-growth-row="add" type="button">+ Dodaj region / wariant</button></div>
+      <div id="growthSegments">${segments.map((v,i)=>segmentHtml(v,i)).join('')}</div>
+      <div class="growth-form-total" id="growthFormTotals" role="status"></div>
+      <details class="lite-advanced"><summary>Dane do analizy (opcjonalne)</summary><label>Kampania / nazwa testu<input maxlength="120" name="campaign" value="${safe(batch?.campaign||'')}" placeholder="np. Personal Trainers November"></label>
+      <label>Strefa czasowa wysyłki<input maxlength="100" name="timeZone" value="${safe(batch?.timeZone||(editing?'':tz()))}" placeholder="np. Europe/Warsaw"></label>
+      <label>Notatki do eksperymentu<textarea name="notes" rows="2" maxlength="500" placeholder="np. Wersja A z personalizacją, B bez…">${safe(batch?.notes||'')}</textarea></label></details>
+      <div class="lite-form-footer"><span>${editing?'Edycja nie nalicza dodatkowego XP.':`Operator: <strong>${safe(user||'—')}</strong> · max 100 XP dziennie`}</span><button class="btn" type="submit">${editing?'Zapisz zmiany':'Zapisz sesję'}</button></div>
+      </form>`,(data,formEl)=>{
+        const value=Object.fromEntries(data.entries());
+        value.segments=[...formEl.querySelectorAll('[data-growth-segment]')].map(row=>({
+          count:row.querySelector('[name="segmentCount"]').value,region:row.querySelector('[name="segmentRegion"]').value,
+          country:row.querySelector('[name="segmentCountry"]').value,channel:row.querySelector('[name="segmentChannel"]').value,
+          variant:row.querySelector('[name="segmentVariant"]').value,viewed:row.querySelector('[name="segmentViewed"]').value,
+          notViewed:row.querySelector('[name="segmentNotViewed"]').value
+        }));
+        const result=editing?updateBatch(batch.id,value):createBatch(value);
+        if(result)window.SWLite.closeDialog();
+      });
+    $('liteDialog')?.classList.add('growth-dialog');
+    updateFormTotals();
+    if(focusResults)$('growthSegments')?.querySelector('[name="segmentViewed"]')?.focus();
+  }
+  const csvCell=v=>{
+    let t=String(v??'');
+    if(/^[\s]*[=+@-]/.test(t))t="'"+t; // spreadsheet formula injection protection
+    return '"'+t.replace(/"/g,'""')+'"';
+  };
+  function outreachCsv(data=db,period=periodFilter){
+    const range=dates(period);
+    const fields=['session_id','operator','date','start_time','end_time','time_zone','region','country','channel','variant','sent','viewed','confirmed_not_viewed','unknown','viewed_of_sent_pct','statuses_checked_pct','campaign','notes','created_at','edited_at'];
+    const rows=activeBatches(data).filter(a=>inside(batchDate(a),range)).sort((a,b)=>batchDate(a).localeCompare(batchDate(b))).flatMap(batch=>segmentsOf(batch).map(seg=>[
+      batch.id,batch.owner,batchDate(batch),batch.startedAt||'',batch.endedAt||'',batch.timeZone||'',seg.region,seg.country,seg.channel,seg.variant,
+      seg.count,seg.viewed,seg.notViewed,seg.unknown,seg.count?(100*seg.viewed/seg.count).toFixed(2):'',
+      seg.count?(100*(seg.viewed+seg.notViewed)/seg.count).toFixed(2):'',batch.campaign||'',batch.notes||'',batch.createdAt||'',batch.editedAt||''
+    ]));
+    return '\uFEFF'+[fields,...rows].map(r=>r.map(csvCell).join(';')).join('\r\n');
+  }
+  function downloadCsv(){
+    const s=outreachCsv();const blob=new Blob([s],{type:'text/csv;charset=utf-8'});const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');a.href=url;a.download=`sitewarrior-outreach-${periodFilter}-${today()}.csv`;document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),1000);notify('Wyeksportowano dane do CSV');
   }
   function toggle(period) {periodFilter = ['week','month','all'].includes(period)?period:'week';render()}
   const selector = () => `<div class="growth-period">${[['week','Tydzień'],['month','30 dni'],['all','Całość']].map(([p,l])=>`<button type="button" class="${periodFilter===p?'active':''}" data-growth="period" data-period="${p}">${l}</button>`).join('')}</div>`;
   const card = (label,value,note) => `<div class="lite-kpi"><span>${safe(label)}</span><strong>${value}</strong><small>${safe(note)}</small></div>`;
   const barList = (data,denominator) => Object.entries(data).filter(([,n])=>n>0).sort((a,b)=>b[1]-a[1]).map(([label,n])=>`<div class="growth-bar-row"><div><span>${safe(label)}</span><strong>${num(n)}</strong></div><div class="growth-bar-track"><span style="width:${denominator?Math.min(100,n/denominator*100):0}%"></span></div></div>`).join('') || '<p class="lite-footnote">Brak zapisanych sesji w tym okresie.</p>';
-  function renderOutreach() {
-    const s=summary(), last=s.batches.slice().sort((a,b)=>batchDate(b).localeCompare(batchDate(a)) || String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
-    $('content').innerHTML = `<section class="lite-head"><div><div class="lite-overline">OUTBOUND / ACTIVITY COUNTER</div><h1>Outreach Log</h1><p>Zapisuj ilość wysłanych pierwszych wiadomości, region i kanał. Nie musisz wpisywać firm. Kiedy ktoś odpowie „sure” i jest zainteresowany, dodaj go w Sales.</p></div><div class="lite-head-action">${action('add','+ Zapisz outreach')}</div></section>
-      <div class="growth-toolbar">${selector()}<button class="lite-action" data-growth="go-sales">+ Zainteresowany lead → Sales</button></div>
-      <div class="lite-kpis growth-summary">${card('Wysłane wiadomości',num(s.outreach),'Łącznie w wybranym okresie')}${card('Kari',num(s.byOperator.Kari),'Zaliczony outreach')}${card('Adi',num(s.byOperator.Adi),'Zaliczony outreach')}${card('Sesje outreach',num(s.batches.length),'Zapisane zbiorczo')}</div>
-      <div class="growth-two-cols"><section class="lite-surface"><div class="lite-section-heading"><h2>Regiony</h2><span class="lite-overline">WOLUMEN</span></div>${barList(s.byRegion,s.outreach)}</section>
-      <section class="lite-surface"><div class="lite-section-heading"><h2>Kanały</h2><span class="lite-overline">IG / WA / EMAIL</span></div>${barList(s.byChannel,s.outreach)}</section></div>
-      <section class="lite-surface"><div class="lite-section-heading"><div><span class="lite-overline">RECENT ACTIVITY</span><h2>Zapisane sesje</h2></div><span class="lite-footnote">Najpierw najnowsze</span></div>
-      ${last.slice(0,100).map(a=>`<div class="growth-log-row"><div class="growth-count">${num(a.count)}</div><div class="growth-entry"><strong>${safe(normalizeRegion(a.region))} · ${safe(a.channel)}${a.country?' · '+safe(a.country):''}</strong><small>${safe(batchDate(a))} · ${safe(a.owner||'—')}${a.xpAwarded?' · +'+num(a.xpAwarded)+' XP':''}</small></div><div class="growth-log-actions">${action('edit','Edytuj',a.id)}${action('archive','Usuń',a.id)}</div></div>`).join('')||'<div class="lite-empty"><strong>Nie ma jeszcze logów.</strong><p>Po wysłaniu wiadomości zapisz liczbę, region i kanał w jednym wpisie.</p></div>'}
-      ${last.length>100?`<p class="lite-footnote">Pokazano 100 z ${last.length} sesji. Statystyki obejmują wszystkie.</p>`:''}
-      <p class="lite-footnote">Wpisy typu „outreach batch” są niezależne od CRM. Historyczne pojedyncze aktywności zostały zachowane, ale nie są automatycznie doliczane do nowego licznika — unikamy podwójnego liczenia.</p></section>`;
+  const readRate=(v,total)=>total?percent(v,total):'—';
+  const variantTable=s=>Object.entries(s.byVariant).filter(([,d])=>d.count>0).map(([v,d])=>`<div class="growth-test-row"><div class="growth-test-title"><strong>Wiadomość ${safe(v)}</strong><span>${num(d.count)} wysłanych</span></div><div class="growth-test-metrics"><div><strong>${num(d.viewed)}</strong><small>Wyświetlone</small></div><div><strong>${readRate(d.viewed,d.count)}</strong><small>Min. view rate</small></div><div><strong>${readRate(d.viewed+d.notViewed,d.count)}</strong><small>Zweryfikowane</small></div></div><div class="growth-bar-track"><span style="width:${d.count?100*d.viewed/d.count:0}%"></span></div></div>`).join('');
+  function renderOutreach(){
+    const s=summary(),last=s.batches.slice().sort((a,b)=>batchDate(b).localeCompare(batchDate(a))||String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
+    const todayValue=activeBatches(db).filter(a=>batchDate(a)===today()).reduce((n,a)=>n+segmentsOf(a).reduce((m,x)=>m+x.count,0),0);
+    const targetProgress=Math.min(100,todayValue/dayTarget*100);
+    const todayOperators={Kari:0,Adi:0};for(const a of activeBatches(db).filter(a=>batchDate(a)===today()))todayOperators[a.owner]=(todayOperators[a.owner]||0)+segmentsOf(a).reduce((n,x)=>n+x.count,0);
+    const days=Array.from({length:7},(_,i)=>{const d=new Date();d.setDate(d.getDate()-(6-i));const day=today(d);return {day,value:activeBatches(db).filter(a=>batchDate(a)===day).reduce((n,a)=>n+segmentsOf(a).reduce((m,x)=>m+x.count,0),0)};});
+    const hours=Object.entries(s.byHour).sort((a,b)=>a[0].localeCompare(b[0]));
+    $('content').innerHTML=`<section class="lite-head"><div><div class="lite-overline">OUTBOUND / EXPERIMENT TRACKING</div><h1>Outreach Log</h1><p>Jedna sesja, wiele regionów. Mierz wyświetlenia, kanały, godzinę wysyłki oraz testy wiadomości A/B. Tylko zainteresowane odpowiedzi dodawaj jako leady do Sales.</p></div><div class="lite-head-action">${action('add','+ Nowa sesja')}</div></section>
+      <div class="growth-toolbar">${selector()}<div class="growth-tool-actions">${action('export','Eksport CSV')}${action('go-sales','+ Zainteresowany lead → Sales')}</div></div>
+      <section class="growth-target"><div class="growth-target-copy"><span class="lite-overline">DAILY OUTREACH TARGET</span><strong>${num(todayValue)} <span>/ ${num(dayTarget)} wiadomości dzisiaj</span></strong><small>${todayValue>=dayTarget?'Cel osiągnięty.':'Do celu pozostało '+num(dayTarget-todayValue)+'.'} Cel dotyczy łącznie Kari i Adiego. Kari: ${num(todayOperators.Kari||0)} · Adi: ${num(todayOperators.Adi||0)}.</small></div><div class="growth-target-meter"><div class="growth-bar-track"><span style="width:${targetProgress}%"></span></div><b>${readRate(Math.min(todayValue,dayTarget),dayTarget)} celu</b></div></section>
+      <div class="lite-kpis growth-summary">${card('Wysłane wiadomości',num(s.outreach),'Wybrany okres')}${card('Wyświetlone',num(s.viewed),`Minimum ${readRate(s.viewed,s.outreach)} wysłanych`)}${card('Potwierdzone niewyświetlone',num(s.notViewed),'Nie mylić ze statusem nieznanym')}${card('Status nieznany',num(s.unknown),`${readRate(s.viewed+s.notViewed,s.outreach)} wyników sprawdzonych`)}</div>
+      <div class="growth-two-cols"><section class="lite-surface"><div class="lite-section-heading"><div><span class="lite-overline">MESSAGE EXPERIMENTS</span><h2>A / B — porównanie wiadomości</h2></div></div>${variantTable(s)}<p class="lite-footnote">View rate to wyświetlone / wszystkie wysłane w danym wariancie, a nie odsetek odpowiedzi. Wyniki wpisuj ręcznie; porównuj warianty po podobnym czasie od wysyłki i przy podobnej liczbie zweryfikowanych statusów.</p></section>
+      <section class="lite-surface"><div class="lite-section-heading"><div><span class="lite-overline">DAILY CONSISTENCY</span><h2>Ostatnie 7 dni / cel 50</h2></div></div>${days.map(d=>`<div class="growth-daily-row"><span>${safe(d.day.slice(5))}</span><div class="growth-bar-track"><span style="width:${Math.min(100,d.value/dayTarget*100)}%"></span></div><strong>${num(d.value)}</strong></div>`).join('')}<p class="lite-footnote">Plan dzienny = 50 wysłanych pierwszych wiadomości, niezależnie od liczby sesji i regionów.</p></section></div>
+      <div class="growth-two-cols"><section class="lite-surface"><div class="lite-section-heading"><h2>Regiony</h2><span class="lite-overline">WOLUMEN</span></div>${barList(s.byRegion,s.outreach)}<div class="growth-split-foot">Kari: <strong>${num(s.byOperator.Kari||0)}</strong> · Adi: <strong>${num(s.byOperator.Adi||0)}</strong></div></section>
+      <section class="lite-surface"><div class="lite-section-heading"><h2>Kanały</h2><span class="lite-overline">WHATSAPP / IG / EMAIL</span></div>${barList(s.byChannel,s.outreach)}</section></div>
+      <section class="lite-surface"><div class="lite-section-heading"><div><span class="lite-overline">SEND TIME</span><h2>O jakich godzinach piszecie?</h2></div><span class="lite-footnote">Godziny zapisane lokalnie dla danej sesji</span></div>${hours.length?`<div class="growth-hours">${hours.map(([hour,d])=>`<div class="growth-hour"><strong>${safe(hour)}</strong><div class="growth-bar-track"><span style="width:${100*d.count/Math.max(...hours.map(x=>x[1].count),1)}%"></span></div><span>${num(d.count)} wys. · ${num(d.viewed)} wyśw.</span></div>`).join('')}</div>`:'<p class="lite-footnote">Starsze sesje nie miały zapisanej prawdziwej godziny. Pojawi się tu tylko outreach z wprowadzoną godziną wysyłki.</p>'}<p class="lite-footnote">Godziny różnych stref czasowych nie są tu przeliczane. Eksport zawiera strefę każdej sesji do prawidłowej analizy w arkuszu.</p></section>
+      <section class="lite-surface"><div class="lite-section-heading"><div><span class="lite-overline">RECENT ACTIVITY</span><h2>Sesje i korekty wyników</h2></div><span class="lite-footnote">${num(s.batches.length)} sesji · kliknij Edytuj, żeby dopisać późniejsze wyświetlenia</span></div>
+      ${last.slice(0,100).map(a=>{const segs=segmentsOf(a);const n=segs.reduce((v,x)=>v+x.count,0),v=segs.reduce((v,x)=>v+x.viewed,0),nv=segs.reduce((v,x)=>v+x.notViewed,0);
+        return `<div class="growth-log-row"><div class="growth-count">${num(n)}</div><div class="growth-entry"><strong>${segs.map(x=>`${num(x.count)} ${safe(x.region)} / ${safe(x.channel)} / ${safe(x.variant)}`).join(' · ')}</strong><small>${safe(batchDate(a))}${a.startedAt?' · '+safe(a.startedAt):''}${a.endedAt?'–'+safe(a.endedAt):''} · ${safe(a.owner||'—')}${a.xpAwarded?' · +'+num(a.xpAwarded)+' XP':''}</small><small class="growth-outcomes">${num(v)} wyświetlonych · ${num(nv)} niewyświetlonych · ${num(Math.max(0,n-v-nv))} bez danych</small></div><div class="growth-log-actions">${action('results','Wyniki',a.id)}${action('edit','Edytuj',a.id)}${action('archive','Usuń',a.id)}</div></div>`}).join('')||'<div class="lite-empty"><strong>Brak sesji.</strong><p>Zacznij od dodania wysłanych wiadomości i podziału na regiony.</p></div>'}
+      ${last.length>100?`<p class="lite-footnote">Pokazano 100 z ${last.length} sesji, podsumowanie obejmuje wszystkie.</p>`:''}
+      <p class="lite-footnote">Starsze sesje zostały zachowane. Ich wyświetlenia, wariant wiadomości i prawdziwa godzina pozostają nieznane, dopóki nie uzupełnisz ich ręcznie. Żadnych leadów nie tworzymy automatycznie.</p></section>`;
   }
   function renderRadar() {
     const s=summary(), xp=db.xp||{}, current=Number(xp[user]||0), level=Math.floor(current/250)+1, progress=current%250/250*100;
@@ -190,18 +323,30 @@
     lead.xpWinAwarded=150;db.xp ??= {Kari:0,Adi:0};const owner=user||lead.owner||'Kari';db.xp[owner]=Number(db.xp[owner]||0)+150;return 150;
   }
   document.addEventListener('click',event=>{
+    const rowBtn=event.target.closest?.('[data-growth-row]');if(!rowBtn)return;
+    event.preventDefault();
+    const container=$('growthSegments');if(!container)return;
+    if(rowBtn.dataset.growthRow==='add')container.insertAdjacentHTML('beforeend',segmentHtml({},container.querySelectorAll('[data-growth-segment]').length));
+    else if(container.querySelectorAll('[data-growth-segment]').length>1)rowBtn.closest('[data-growth-segment]')?.remove();
+    updateFormTotals();
+  });
+  document.addEventListener('input',event=>{if(event.target.closest?.('#growthForm'))updateFormTotals()});
+  document.addEventListener('change',event=>{if(event.target.closest?.('#growthForm'))updateFormTotals()});
+  document.addEventListener('click',event=>{
     const el=event.target.closest?.('[data-growth]');if(!el)return;
     event.preventDefault();
     switch(el.dataset.growth){
       case 'add':form();break;
       case 'edit':form(allBatches(db).find(x=>String(x.id)===el.dataset.id));break;
+      case 'results':form(allBatches(db).find(x=>String(x.id)===el.dataset.id),true);break;
       case 'archive':archiveBatch(el.dataset.id);break;
       case 'period':toggle(el.dataset.period);break;
+      case 'export':downloadCsv();break;
       case 'go-sales':navigate('sales');break;
       case 'go-outreach':navigate('outreach');break;
       case 'go-finance':navigate('finance');break;
       case 'go-today':navigate('dashboard');break;
     }
   });
-  window.SWGrowth={regions,normalizeRegion,channels,dates,summary,createBatch,updateBatch,archiveBatch,renderOutreach,renderRadar,rewardSalesEvent,rewardWin,openForm:form};
+  window.SWGrowth={regions,normalizeRegion,channels,variants,dates,summary,segmentsOf,outreachCsv,createBatch,updateBatch,archiveBatch,renderOutreach,renderRadar,rewardSalesEvent,rewardWin,openForm:form};
 })();
