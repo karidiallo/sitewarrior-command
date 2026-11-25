@@ -117,7 +117,7 @@ render=function(){if(view==='dashboard')return renderToday();if(view==='action')
 const previousNavigate=navigate;
 navigate=function(target){if(target==='analytics'||target==='review'||target==='pulse')target='action';if(['dashboard','action','outreach','sales','more'].includes(target)){view=target;document.querySelectorAll('.nav').forEach(n=>n.classList.toggle('active',n.dataset.view===target));if($('sideUser'))$('sideUser').textContent='◉ '+(user||'Operator');render();return}previousNavigate(target);document.querySelectorAll('.nav').forEach(n=>n.classList.toggle('active',n.dataset.view===(target==='tasks'?'tasks':target==='forge'||target==='projects'?'forge':'more')))};
 // Legacy modules insert utility links during load; keep the main navigation focused.
-document.querySelectorAll('.sidebar .nav').forEach(n=>{if(!['dashboard','action','outreach','sales','tasks','forge','more'].includes(n.dataset.view))n.remove()});
+document.querySelectorAll('.sidebar .nav').forEach(n=>{if(!['dashboard','action','outreach','sales','pipeline','tasks','forge','more'].includes(n.dataset.view))n.remove()});
 const oldNew=window.swNew;window.swNew=(kind,...args)=>kind==='leads'?quickAdd():oldNew?.(kind,...args);
 const oldEdit=window.swEdit;window.swEdit=(kind,id,...args)=>kind==='leads'&&!id?quickAdd():oldEdit?.(kind,id,...args);
 window.swV8NewOutreach=()=>window.SWGrowth?.openForm();
