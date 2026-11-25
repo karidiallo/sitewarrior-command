@@ -84,7 +84,7 @@
   try{promise=save()}
   catch(err){promise=Promise.reject(err)}
   return Promise.resolve(promise).then(()=>{
-   notify('Zapis potwierdzony · '+l.name+' → '+to);return true;
+   notify('Zapis potwierdzony · '+l.name+' → '+to);if($('jDetail'))window.SWJourney?.openLead?.(l.id);return true;
   }).catch(err=>{
    // Do not silently roll back data after a failed cloud write. The recovery
    // snapshot and explicit conflict flow preserve the user's pending changes.
@@ -102,11 +102,6 @@
   if(to==='Final'){
    notify('Final wymaga potwierdzonego podpisu i zaksięgowanej zaliczki. Otwieram kartę.');
    window.SWJourney?.openLead?.(id);renderBoard();return;
-  }
-  if(to==='Lead'&&!(l.crmCallCompletedAt&&l.crmDocsSentAt)&&!l.journey?.contract_sent){
-   dialog('Zakwalifikuj jako Lead',`Potwierdź realnie wykonane kroki dla ${l.name}. Przesunięcie nie rejestruje automatycznie calla ani wysłania dokumentów w szczegółowym workflow.`,
-    `<label class="sw-crm-check"><input type="checkbox" name="call" required> Call faktycznie się odbył</label><label class="sw-crm-check"><input type="checkbox" name="docs" required> Klient zaakceptował warunki i wysłaliśmy dokumentację</label><label>Notatka (opcjonalna)<textarea name="note" rows="3" maxlength="1500"></textarea></label>`,
-    async d=>applyChange(l,to,String(d.get('note')||''),{confirmed:true}));return;
   }
   if(to==='To Follow Up'){
    dialog('Zaplanuj follow-up',`Wpisz następny konkretny krok dla ${l.name}. Termin pozwoli wyświetlić kontakt w kolejce na dziś.`,
@@ -155,7 +150,7 @@
  });
  document.addEventListener('change',e=>{
   if(e.target.id==='swCrmOwner'){owner=e.target.value;renderBoard()}
-  if(e.target.matches?.('[data-crm-stage]')){const {crmStage:id}=e.target.dataset;requestMove(id,e.target.value);if(view==='pipeline')renderBoard()}
+  if(e.target.matches?.('[data-crm-stage]')){const {crmStage:id}=e.target.dataset;requestMove(id,e.target.value);e.target.value=stage(find(id));if(view==='pipeline')renderBoard()}
  });
  document.addEventListener('input',e=>{if(e.target.id!=='swCrmSearch')return;const start=e.target.selectionStart;query=e.target.value;renderBoard();const search=$('swCrmSearch');search?.focus();try{search?.setSelectionRange(start,start)}catch{}});
  document.addEventListener('dragstart',e=>{const el=e.target.closest?.('.sw-crm-card[data-crm-lead]');if(!el||pending)return;dragId=el.dataset.crmLead;el.classList.add('sw-crm-dragging');e.dataTransfer?.setData('text/plain',dragId)});
