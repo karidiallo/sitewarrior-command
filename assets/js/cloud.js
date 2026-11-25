@@ -24,7 +24,21 @@ function downloadRecovery(){const data=localStorage.getItem(localKey())||JSON.st
 function showConflict(){let old=document.getElementById('swRecoveryDialog');if(old)old.remove();const el=document.createElement('div');el.id='swRecoveryDialog';el.className='modalwrap';el.style.display='flex';el.style.zIndex='120';el.innerHTML=`<div class="modal" style="max-width:580px;width:100%"><h2 style="margin-top:0">SYNCHRONIZACJA WSTRZYMANA</h2><p>Zmiany nie zostały potwierdzone w bazie. Mogło dojść do konfliktu z drugą osobą lub błędu połączenia. Lokalna kopia została zachowana.</p><p class="muted" id="swRecoveryReason" style="word-break:break-word"></p><div class="command-actions"><button class="btn" id="swRetrySave">SPRÓBUJ PONOWNIE</button><button class="btn secondary" id="swDownloadChanges">POBIERZ KOPIĘ</button><button class="btn secondary" id="swLoadServer">ODRZUĆ LOKALNE ZMIANY I WCZYTAJ CHMURĘ</button></div><p class="muted" style="font-size:12px">Nie wybieraj „odrzuć”, jeśli nie pobrałaś wcześniej kopii zmian, które chcesz zachować.</p><button class="switch" id="swCloseRecovery">Zamknij okno</button></div>`;document.body.append(el);el.querySelector('#swRecoveryReason').textContent=lastError||'Wystąpił nieznany błąd.';el.querySelector('#swDownloadChanges').onclick=downloadRecovery;el.querySelector('#swCloseRecovery').onclick=()=>el.remove();el.querySelector('#swRetrySave').onclick=async()=>{el.remove();blocked=false;changed=true;await flush()};el.querySelector('#swLoadServer').onclick=async()=>{if(!confirm('Utracisz wszystkie NIEZAPISANE zmiany w tej przeglądarce. Czy na pewno?'))return;downloadRecovery();blocked=false;changed=false;el.remove();await refreshRemote(true);if(!blocked){clearRecovery();location.reload()}}}
 async function fetchAll(){const result=[];for(let from=0;from<100000;from+=1000){let {data,error}=await client.from('sw_records').select('collection,record_id,payload,revision,deleted').order('collection').order('record_id').range(from,from+999);if(error)throw error;result.push(...(data||[]));if((data||[]).length<1000)return result}throw Error('Zbyt wiele rekordów; wymagany eksport i zmiana paginacji.')}
 function loadSnapshot(rows){baseline=new Map();versions=new Map();const state=stateFromRows(rows);const combined={...defaults(),...state};if(!rows.some(r=>r.collection==='__meta'&&r.record_id==='prices')){for(const [id,value] of Object.entries(REFERENCE_PRICES))combined.prices[id+'_FR']={amount:String(value),currency:'EUR'}}db=combined}
-loadCloud=async function(){const {data:{user:authUser},error:authError}=await client.auth.getUser();if(authError||!authUser)throw Error('Brak ważnej sesji');accountId=authUser.id;const pending=localStorage.getItem(localKey());if(pending){blocked=true;lastError='Znaleziono niezapisane zmiany z wcześniejszej sesji. Pobierz kopię i zdecyduj, jak je odzyskać.';status('CLOUD / RECOVERY REQUIRED','error');showConflict();throw Error('Wykryto niezapisane zmiany z wcześniejszej sesji. Najpierw zabezpiecz kopię.')}const rows=await fetchAll();loadSnapshot(rows);changed=false;blocked=false;status('CLOUD / SYNCHRONIZED','saved');if(!refreshTimer)refreshTimer=setInterval(()=>{if(cloudActive&&!changed&&!saving&&!blocked)void refreshRemote(false)},12000);if(!realtimeChannel){realtimeChannel=client.channel('sw-record-events').on('postgres_changes',{event:'*',schema:'public',table:'sw_records'},()=>{if(cloudActive&&!changed&&!saving&&!blocked)void refreshRemote(false)}).subscribe()}};
+loadCloud=async function(){const {data:{user:authUser},error:authError}=await client.auth.getUser();if(authError||!authUser)throw Error('Brak ważnej sesji');accountId=authUser.id;const pending=localStorage.getItem(localKey());const rows=await fetchAll();loadSnapshot(rows);
+ if(pending){
+  // Older version blocked login before a session was active, leaving both retry
+  // and server reload buttons unable to work. Keep the authenticated session
+  // and load the preserved draft after reading the server revision baseline.
+  try{
+   const draft=JSON.parse(pending);
+   if(draft.user!==accountId||!draft.db||typeof draft.db!=='object')throw Error('Nieprawidłowa kopia lokalna');
+   db={...defaults(),...draft.db};
+   changed=true;blocked=true;
+   lastError='Odzyskano niezapisane zmiany z wcześniejszej sesji. Najpierw pobierz kopię, potem wybierz próbę zapisu lub odrzucenie zmian.';
+   status('CLOUD / RECOVERY REQUIRED','error');
+   showConflict();
+  }catch(e){blocked=true;lastError=e.message;status('CLOUD / RECOVERY REQUIRED','error');showConflict()}
+ }else{changed=false;blocked=false;status('CLOUD / SYNCHRONIZED','saved')};if(!refreshTimer)refreshTimer=setInterval(()=>{if(cloudActive&&!changed&&!saving&&!blocked)void refreshRemote(false)},12000);if(!realtimeChannel){realtimeChannel=client.channel('sw-record-events').on('postgres_changes',{event:'*',schema:'public',table:'sw_records'},()=>{if(cloudActive&&!changed&&!saving&&!blocked)void refreshRemote(false)}).subscribe()}};
 async function refreshRemote(force){if((saving||changed||blocked)&&!force)return;try{const rows=await fetchAll();if((saving||changed||blocked)&&!force)return;loadSnapshot(rows);status('CLOUD / SYNCHRONIZED','saved');try{render()}catch(e){console.error('Render failed',e)}}catch(e){lastError=e.message;status('CLOUD / READ ERROR','error')}}
 function changesSince(){const current=indexState(db),changes=[];for(const [k,v] of current){const encoded=JSON.stringify(v.payload);if(baseline.get(k)!==encoded)changes.push({...v,expected:versions.get(k)||0,deleted:false})}for(const [k,encoded] of baseline){if(!current.has(k)){const [collection,id]=k.split(sep);changes.push({collection,id,payload:JSON.parse(encoded),expected:versions.get(k)||0,deleted:true})}}return changes}
 // Canonical values: JSONB may reorder keys after the DB writes a payload.
@@ -86,6 +100,7 @@ async function flush(){
  }finally{saving=false;}
 }
 save=function(){
+ if(blocked){status('CLOUD / SAVE FAILED','error');const error=Promise.reject(new Error(lastError||'Najpierw rozwiąż konflikt zapisu'));error.catch(()=>{});return error}
  if(!cloudActive){
   if(cloudConfigured){status('CLOUD / NOT LOGGED IN','error');return Promise.reject(new Error('Brak sesji Supabase'))}
   try{localStorage.setItem(KEY,JSON.stringify(db));status('LOCAL / SAVED','local');return Promise.resolve(true)}
@@ -100,7 +115,7 @@ save=function(){
  return promise;
 };
 window.swCloudLastError=()=>lastError;
-window.swCloudBuild='8.4.0';
+window.swCloudBuild='14.0.0';
 window.swCloudDebug=()=>({active:cloudActive,saving,changed,blocked,lastError,pending:changesSince().map(x=>({collection:x.collection,id:x.id,expected:x.expected})),taskRows:db.tasks?.length||0});
 window.swCloudPending=()=>saving||changed||blocked;
 window.swRetryCloud=()=>{blocked=false;void flush()};
